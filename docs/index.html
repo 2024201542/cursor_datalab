@@ -1,0 +1,847 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CrossCheck · 多模型互检分类系统</title>
+<style>
+:root{
+  --bg:#04060d;--bg2:#0a0f1c;--line:rgba(148,163,184,.12);--line2:rgba(148,163,184,.22);
+  --text:#e6edf7;--muted:#8b98b0;--dim:#5b6780;
+  --cyan:#22d3ee;--blue:#60a5fa;--violet:#a78bfa;--pink:#f472b6;--green:#34d399;--amber:#fbbf24;--red:#fb7185;
+  --mono:"JetBrains Mono","Cascadia Code",Consolas,"SFMono-Regular",monospace;
+  --sans:"Inter","PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.7;overflow-x:hidden;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+::selection{background:rgba(34,211,238,.3)}
+
+/* ---------- background ---------- */
+.bg-grid{position:fixed;inset:0;z-index:-3;
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:56px 56px;mask-image:radial-gradient(ellipse 80% 60% at 50% 0%,#000 30%,transparent 80%);opacity:.55}
+.bg-glow{position:fixed;z-index:-2;border-radius:50%;filter:blur(120px);opacity:.28;pointer-events:none}
+.bg-glow.g1{width:640px;height:640px;background:var(--cyan);top:-240px;left:-160px}
+.bg-glow.g2{width:560px;height:560px;background:var(--violet);top:30vh;right:-220px;opacity:.2}
+.bg-glow.g3{width:520px;height:520px;background:var(--pink);bottom:-260px;left:30vw;opacity:.12}
+
+/* ---------- nav ---------- */
+.progress{position:fixed;top:0;left:0;height:2px;width:0;z-index:60;background:linear-gradient(90deg,var(--cyan),var(--violet),var(--pink));box-shadow:0 0 12px var(--cyan)}
+nav{position:fixed;top:0;left:0;right:0;z-index:50;display:flex;align-items:center;justify-content:space-between;
+  padding:14px 36px;background:rgba(4,6,13,.55);backdrop-filter:blur(16px);border-bottom:1px solid var(--line)}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.5px}
+.logo-mark{width:26px;height:26px;border-radius:7px;position:relative;background:linear-gradient(135deg,var(--cyan),var(--violet));box-shadow:0 0 18px rgba(34,211,238,.45)}
+.logo-mark::after{content:"";position:absolute;inset:6px;border:2px solid var(--bg);border-radius:50%}
+.logo small{font-family:var(--mono);color:var(--muted);font-weight:400;font-size:12px}
+.nav-links{display:flex;gap:4px}
+.nav-links a{font-size:13.5px;color:var(--muted);padding:6px 12px;border-radius:8px;transition:.2s}
+.nav-links a:hover,.nav-links a.on{color:var(--text);background:rgba(255,255,255,.06)}
+.gh{font-family:var(--mono);font-size:12.5px;padding:7px 14px;border:1px solid var(--line2);border-radius:9px;color:var(--text);transition:.2s}
+.gh:hover{border-color:var(--cyan);box-shadow:0 0 16px rgba(34,211,238,.25)}
+
+/* ---------- layout ---------- */
+section{position:relative;padding:120px 0 40px}
+.wrap{max-width:1180px;margin:0 auto;padding:0 32px}
+.tag{font-family:var(--mono);font-size:12.5px;color:var(--cyan);letter-spacing:2px;text-transform:uppercase;display:flex;align-items:center;gap:10px}
+.tag::before{content:"";width:28px;height:1px;background:linear-gradient(90deg,transparent,var(--cyan))}
+h2{font-size:38px;line-height:1.25;margin:14px 0 14px;letter-spacing:-.5px}
+.grad{background:linear-gradient(100deg,#fff 10%,var(--cyan) 45%,var(--violet) 75%,var(--pink));-webkit-background-clip:text;background-clip:text;color:transparent}
+.lead{color:var(--muted);font-size:16.5px;max-width:760px}
+.card{position:relative;background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.015));border:1px solid var(--line);
+  border-radius:18px;padding:26px;backdrop-filter:blur(10px);transition:border-color .3s,transform .3s,box-shadow .3s}
+.card:hover{border-color:rgba(34,211,238,.35);box-shadow:0 10px 40px -12px rgba(34,211,238,.25)}
+.card h3{font-size:18px;margin-bottom:8px}
+.card p{color:var(--muted);font-size:14.5px}
+.grid{display:grid;gap:18px}
+.g2{grid-template-columns:repeat(2,1fr)}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}
+.mono{font-family:var(--mono)}
+.muted{color:var(--muted)}
+.reveal{opacity:0;transform:translateY(28px);transition:opacity .8s ease,transform .8s cubic-bezier(.2,.8,.2,1)}
+.reveal.in{opacity:1;transform:none}
+.chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--muted)}
+.chip.c{color:var(--cyan);border-color:rgba(34,211,238,.35);background:rgba(34,211,238,.06)}
+.chip.v{color:var(--violet);border-color:rgba(167,139,250,.35);background:rgba(167,139,250,.06)}
+.chip.p{color:var(--pink);border-color:rgba(244,114,182,.35);background:rgba(244,114,182,.06)}
+.chip.g{color:var(--green);border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.06)}
+.chip.a{color:var(--amber);border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.06)}
+.icon{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;margin-bottom:16px;
+  background:linear-gradient(135deg,rgba(34,211,238,.18),rgba(167,139,250,.18));border:1px solid rgba(34,211,238,.25)}
+.icon svg{width:21px;height:21px;stroke:var(--cyan);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+/* ---------- hero ---------- */
+.hero{min-height:100vh;display:flex;align-items:center;padding-top:90px;overflow:hidden}
+#net{position:absolute;inset:0;z-index:-1;opacity:.85}
+.hero-inner{position:relative}
+.badge{display:inline-flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12.5px;color:var(--muted);
+  border:1px solid var(--line2);border-radius:999px;padding:6px 14px 6px 8px;background:rgba(255,255,255,.03)}
+.badge i{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green);animation:pulse 2s infinite}
+@keyframes pulse{50%{opacity:.35}}
+.hero h1{font-size:74px;line-height:1.08;letter-spacing:-2px;margin:26px 0 20px;font-weight:800}
+.hero h1 .sub{display:block;font-size:30px;letter-spacing:0;font-weight:600;color:var(--text);margin-top:14px}
+.hero p.lead{font-size:18px}
+.cta{display:flex;gap:14px;margin-top:34px;flex-wrap:wrap}
+.btn{padding:12px 22px;border-radius:12px;font-size:14.5px;font-weight:600;transition:.25s;display:inline-flex;gap:8px;align-items:center}
+.btn.pri{background:linear-gradient(135deg,var(--cyan),var(--violet));color:#05070f;box-shadow:0 8px 30px -8px rgba(34,211,238,.6)}
+.btn.pri:hover{transform:translateY(-2px);box-shadow:0 12px 36px -8px rgba(34,211,238,.8)}
+.btn.sec{border:1px solid var(--line2);background:rgba(255,255,255,.03)}
+.btn.sec:hover{border-color:var(--violet)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-top:70px;border:1px solid var(--line);border-radius:18px;
+  background:rgba(10,15,28,.55);backdrop-filter:blur(12px);overflow:hidden}
+.stat{padding:22px 26px;border-right:1px solid var(--line)}
+.stat:last-child{border-right:0}
+.stat .v{font-family:var(--mono);font-size:36px;font-weight:700;background:linear-gradient(135deg,#fff,var(--cyan));-webkit-background-clip:text;background-clip:text;color:transparent}
+.stat .k{color:var(--muted);font-size:13px}
+.models-row{display:flex;gap:10px;margin-top:22px;flex-wrap:wrap}
+
+/* ---------- problem ---------- */
+.vs{display:grid;grid-template-columns:1fr 60px 1fr;gap:0;align-items:stretch;margin-top:40px}
+.vs .arrow{display:grid;place-items:center;color:var(--cyan);font-size:26px}
+.vs ul{list-style:none;margin-top:12px}
+.vs li{padding:9px 0;border-bottom:1px dashed var(--line);font-size:14.5px;color:var(--muted);display:flex;gap:10px}
+.vs li:last-child{border:0}
+.vs li b{color:var(--text);font-weight:600}
+.x{color:var(--red)}.ok{color:var(--green)}
+
+/* ---------- pipeline ---------- */
+.flow{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-top:46px;position:relative}
+.flow::before{content:"";position:absolute;top:34px;left:7%;right:7%;height:2px;
+  background:repeating-linear-gradient(90deg,var(--cyan) 0 10px,transparent 10px 18px);opacity:.5;animation:dash 1.2s linear infinite}
+@keyframes dash{to{background-position:18px 0}}
+.step{position:relative;text-align:center}
+.step .dot{width:68px;height:68px;margin:0 auto 16px;border-radius:50%;display:grid;place-items:center;font-family:var(--mono);font-weight:700;font-size:18px;
+  background:radial-gradient(circle at 30% 30%,#1b2440,#0a0f1c);border:1px solid rgba(34,211,238,.4);box-shadow:0 0 0 6px rgba(34,211,238,.05),0 0 30px rgba(34,211,238,.25);position:relative;z-index:1}
+.step:nth-child(3) .dot,.step:nth-child(5) .dot{border-color:rgba(167,139,250,.5);box-shadow:0 0 0 6px rgba(167,139,250,.05),0 0 30px rgba(167,139,250,.25)}
+.step:nth-child(6) .dot{border-color:rgba(244,114,182,.5);box-shadow:0 0 0 6px rgba(244,114,182,.05),0 0 30px rgba(244,114,182,.25)}
+.step h4{font-size:15.5px;margin-bottom:6px}
+.step p{font-size:13px;color:var(--muted);padding:0 4px}
+.modes{margin-top:34px}
+.mode{display:flex;gap:14px;align-items:flex-start}
+.mode .chip{flex:none;margin-top:3px}
+
+/* ---------- terminal demo ---------- */
+.term{margin-top:40px;border-radius:16px;overflow:hidden;border:1px solid var(--line2);background:#070b16;box-shadow:0 30px 80px -30px rgba(0,0,0,.8),0 0 0 1px rgba(34,211,238,.05)}
+.term-bar{display:flex;align-items:center;gap:8px;padding:12px 16px;background:#0c1222;border-bottom:1px solid var(--line)}
+.term-bar i{width:11px;height:11px;border-radius:50%}
+.term-bar i:nth-child(1){background:#ff5f57}.term-bar i:nth-child(2){background:#febc2e}.term-bar i:nth-child(3){background:#28c840}
+.term-bar span{margin-left:12px;font-family:var(--mono);font-size:12px;color:var(--dim)}
+.term-body{padding:22px 26px;font-family:var(--mono);font-size:13.5px;line-height:1.9}
+.tl{opacity:0;transform:translateX(-8px);transition:opacity .45s,transform .45s}
+.term.go .tl{opacity:1;transform:none}
+.tl.h{color:var(--violet);margin-top:10px;font-weight:700}
+.tl .who{display:inline-block;width:92px;color:var(--blue)}
+.tl .lab{display:inline-block;min-width:118px}
+.tl .why{color:var(--dim)}
+.l-neu{color:#cbd5e1}.l-pos{color:var(--green)}.l-neg{color:var(--red)}
+.tl.warn{color:var(--amber)}.tl.done{color:var(--green)}
+.cursor{display:inline-block;width:8px;height:15px;background:var(--cyan);vertical-align:middle;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* ---------- arch ---------- */
+.arch{display:grid;grid-template-columns:1.25fr 1fr;gap:18px;margin-top:40px}
+.layers{display:flex;flex-direction:column;gap:12px}
+.layer{display:grid;grid-template-columns:130px 1fr;align-items:center;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:rgba(255,255,255,.02)}
+.layer .ln{font-size:13px;font-weight:600;padding:16px;height:100%;display:flex;align-items:center;border-right:1px solid var(--line);background:rgba(34,211,238,.05)}
+.layer:nth-child(2) .ln{background:rgba(96,165,250,.06)}.layer:nth-child(3) .ln{background:rgba(167,139,250,.07)}
+.layer:nth-child(4) .ln{background:rgba(244,114,182,.06)}.layer:nth-child(5) .ln{background:rgba(52,211,153,.06)}
+.mods{display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px}
+.mod{font-family:var(--mono);font-size:12px;padding:5px 10px;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid var(--line)}
+.mod em{font-style:normal;color:var(--dim);font-family:var(--sans);margin-left:6px}
+.feat{display:flex;gap:12px;padding:12px 0;border-bottom:1px dashed var(--line)}
+.feat:last-child{border:0}
+.feat b{display:block;font-size:14.5px}
+.feat span{font-size:13px;color:var(--muted)}
+.feat .n{font-family:var(--mono);color:var(--cyan);font-size:12px;margin-top:3px;flex:none;width:22px}
+.mtable{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:10px}
+.mtable td,.mtable th{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left}
+.mtable th{color:var(--dim);font-weight:500;font-size:12px;font-family:var(--mono);text-transform:uppercase;letter-spacing:1px}
+.mtable td:first-child{font-weight:600}
+
+/* ---------- experiment header ---------- */
+.exp-head{display:flex;justify-content:space-between;align-items:flex-end;gap:30px;flex-wrap:wrap}
+.exp-no{font-family:var(--mono);font-size:96px;font-weight:800;line-height:1;background:linear-gradient(180deg,rgba(255,255,255,.18),transparent);-webkit-background-clip:text;background-clip:text;color:transparent}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:34px}
+.kpi{padding:18px 20px;border-radius:14px;border:1px solid var(--line);background:rgba(255,255,255,.025)}
+.kpi .v{font-family:var(--mono);font-size:28px;font-weight:700}
+.kpi .k{font-size:12.5px;color:var(--muted)}
+
+/* ---------- bar chart ---------- */
+.bc{position:relative;height:340px;margin-top:10px}
+.bc-plot{position:absolute;left:38px;right:92px;top:14px;bottom:40px;border-left:1px solid var(--line2);border-bottom:1px solid var(--line2)}
+.bc-tick{position:absolute;left:0;right:0;border-top:1px dashed rgba(148,163,184,.08)}
+.bc-tick span{position:absolute;left:-36px;top:-9px;width:30px;text-align:right;font-family:var(--mono);font-size:11px;color:var(--dim)}
+.bc-ref{position:absolute;left:0;right:0;border-top:1.5px dashed;z-index:2;pointer-events:none}
+.bc-ref em{position:absolute;left:calc(100% + 6px);top:-9px;width:86px;font-style:normal;font-family:var(--mono);font-size:11px;line-height:1.5;white-space:nowrap}
+.bc-cap{font-size:12px;color:var(--dim);margin-top:4px}
+.bc-ref.best{border-color:rgba(96,165,250,.7)}.bc-ref.best em{color:var(--blue)}
+.bc-ref.up{border-color:rgba(251,191,36,.6)}.bc-ref.up em{color:var(--amber)}
+.bc-bars{position:absolute;inset:0;display:flex;align-items:flex-end;justify-content:space-around;padding:0 2%}
+.bc-col{position:relative;width:11%;height:100%;display:flex;align-items:flex-end}
+.bc-bar{width:100%;height:0;border-radius:8px 8px 2px 2px;position:relative;transition:height 1.2s cubic-bezier(.2,.8,.2,1)}
+.go .bc-bar{height:var(--h)}
+.bc-bar b{position:absolute;top:-24px;left:50%;transform:translateX(-50%);font-family:var(--mono);font-size:12.5px;white-space:nowrap;opacity:0;transition:opacity .4s .8s}
+.go .bc-bar b{opacity:1}
+.k-m{background:linear-gradient(180deg,#60a5fa,rgba(96,165,250,.25))}
+.k-e{background:linear-gradient(180deg,#fbbf24,rgba(251,191,36,.25))}
+.k-s{background:linear-gradient(180deg,#34d399,rgba(52,211,153,.25));box-shadow:0 0 24px rgba(52,211,153,.35)}
+.bc-name{position:absolute;bottom:-30px;left:50%;transform:translateX(-50%);font-size:12.5px;color:var(--muted);white-space:nowrap}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+
+/* ---------- split / donut ---------- */
+.split{display:grid;grid-template-columns:200px 1fr;gap:26px;align-items:center}
+.donut{position:relative;width:200px;height:200px}
+.donut svg{transform:rotate(-90deg)}
+.donut circle{fill:none;stroke-width:16}
+.donut .trk{stroke:rgba(244,114,182,.55)}
+.donut .val{stroke:url(#dg);stroke-linecap:round;transition:stroke-dashoffset 1.6s cubic-bezier(.2,.8,.2,1)}
+.donut .ctr{position:absolute;inset:0;display:grid;place-items:center;text-align:center}
+.donut .ctr b{font-family:var(--mono);font-size:32px;display:block;line-height:1}
+.donut .ctr span{font-size:12px;color:var(--muted)}
+.hbar{margin:14px 0}
+.hbar .t{display:flex;justify-content:space-between;font-size:13.5px;margin-bottom:6px}
+.hbar .t b{font-family:var(--mono)}
+.hbar .tr{height:10px;border-radius:99px;background:rgba(255,255,255,.05);overflow:hidden}
+.hbar .fl{height:100%;width:0;border-radius:99px;transition:width 1.3s cubic-bezier(.2,.8,.2,1)}
+.go .hbar .fl{width:var(--w)}
+
+/* ---------- tabs ---------- */
+.tabs{display:inline-flex;gap:6px;padding:6px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.02);margin-top:34px;flex-wrap:wrap}
+.tabs button{all:unset;cursor:pointer;padding:9px 18px;border-radius:10px;font-size:14px;color:var(--muted);transition:.25s}
+.tabs button:hover{color:var(--text)}
+.tabs button.on{color:#05070f;background:linear-gradient(135deg,var(--cyan),var(--violet));font-weight:600;box-shadow:0 6px 20px -6px rgba(34,211,238,.6)}
+.ds-meta{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--line);border-radius:14px;overflow:hidden;margin:18px 0}
+.ds-meta div{padding:14px 18px;border-right:1px solid var(--line)}
+.ds-meta div:last-child{border:0}
+.ds-meta small{display:block;font-size:11.5px;color:var(--dim);font-family:var(--mono);letter-spacing:1px;text-transform:uppercase}
+.ds-meta span{font-size:14px}
+
+/* ---------- confusion ---------- */
+.cm{display:grid;gap:5px;margin-top:8px}
+.cm .h{font-size:12px;color:var(--dim);display:grid;place-items:center;font-family:var(--mono)}
+.cm .rh{justify-content:end;padding-right:6px}
+.cm .c{aspect-ratio:1.5;border-radius:8px;display:grid;place-items:center;font-family:var(--mono);font-size:15px;font-weight:600;border:1px solid var(--line)}
+.cm .c.d{border-color:rgba(52,211,153,.45)}
+
+/* ---------- dumbbell ---------- */
+.db-row{display:grid;grid-template-columns:200px 1fr;align-items:center;gap:18px;padding:14px 0;border-bottom:1px dashed var(--line)}
+.db-row:last-child{border:0}
+.db-name b{display:block;font-size:14.5px}
+.db-name span{font-size:12px;color:var(--dim);font-family:var(--mono)}
+.db-track{position:relative;height:34px}
+.db-track::before{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:var(--line2)}
+.db-line{position:absolute;top:calc(50% - 2px);height:4px;border-radius:4px;background:linear-gradient(90deg,var(--pink),var(--cyan));opacity:.7;transform-origin:left;transform:scaleX(0);transition:transform 1.2s cubic-bezier(.2,.8,.2,1) .2s}
+.go .db-line{transform:scaleX(1)}
+.db-dot{position:absolute;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;border:3px solid var(--bg)}
+.db-dot.p{background:var(--pink);box-shadow:0 0 14px var(--pink)}
+.db-dot.c{background:var(--cyan);box-shadow:0 0 14px var(--cyan)}
+.db-dot em{position:absolute;top:-24px;left:50%;transform:translateX(-50%);font-style:normal;font-family:var(--mono);font-size:12px;white-space:nowrap}
+.db-dot.p em{color:var(--pink)}.db-dot.c em{color:var(--cyan)}
+.db-axis{display:grid;grid-template-columns:200px 1fr;gap:18px}
+.db-axis div{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;color:var(--dim)}
+
+/* ---------- review chips ---------- */
+.rv{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}
+.rv div{padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.02)}
+.rv small{display:block;color:var(--dim);font-size:12px}
+.rv span{font-family:var(--mono);font-size:14px}
+.up{color:var(--green)}.dn{color:var(--red)}.eq{color:var(--muted)}
+
+/* ---------- insights ---------- */
+.ins{position:relative;overflow:hidden}
+.ins .big{font-family:var(--mono);font-size:44px;font-weight:800;line-height:1.1;margin:6px 0 10px}
+.ins .no{position:absolute;right:18px;top:10px;font-family:var(--mono);font-size:64px;font-weight:800;color:rgba(255,255,255,.04)}
+.calc{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:18px;align-items:center;margin-top:18px}
+.calc .box{padding:22px;border-radius:16px;border:1px solid var(--line);text-align:center;background:rgba(255,255,255,.02)}
+.calc .box b{display:block;font-family:var(--mono);font-size:34px}
+.calc .box span{font-size:13px;color:var(--muted)}
+.calc .op{font-size:26px;color:var(--dim);font-family:var(--mono)}
+
+/* ---------- platform ---------- */
+.win{border:1px solid var(--line2);border-radius:14px;overflow:hidden;background:#070b16}
+.win-bar{padding:10px 14px;background:#0c1222;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--dim);display:flex;gap:8px;align-items:center}
+.win-bar i{width:9px;height:9px;border-radius:50%;background:#334155}
+.win-body{padding:18px;height:118px}
+.fake-row{display:flex;gap:8px;margin:8px 0}
+.fake{height:10px;border-radius:5px;background:rgba(255,255,255,.07)}
+.fake.c{background:rgba(34,211,238,.35)}.fake.v{background:rgba(167,139,250,.35)}.fake.g{background:rgba(52,211,153,.35)}.fake.p{background:rgba(244,114,182,.35)}
+.mini-bars{display:flex;align-items:flex-end;gap:6px;height:60px;margin-top:10px}
+.mini-bars i{flex:1;border-radius:3px 3px 0 0;background:linear-gradient(180deg,var(--blue),transparent)}
+.mini-bars i:nth-child(n+4){background:linear-gradient(180deg,var(--amber),transparent)}
+.mini-bars i:last-child{background:linear-gradient(180deg,var(--green),transparent)}
+
+/* ---------- roadmap ---------- */
+.road{position:relative;margin-top:44px;padding-left:34px}
+.road::before{content:"";position:absolute;left:9px;top:6px;bottom:6px;width:2px;background:linear-gradient(180deg,var(--green),var(--cyan) 30%,var(--violet) 65%,rgba(244,114,182,.2))}
+.ms{position:relative;margin-bottom:18px}
+.ms::before{content:"";position:absolute;left:-31px;top:24px;width:14px;height:14px;border-radius:50%;background:var(--bg);border:2px solid var(--violet)}
+.ms.done::before{background:var(--green);border-color:var(--green);box-shadow:0 0 14px var(--green)}
+.ms.doing::before{background:var(--cyan);border-color:var(--cyan);box-shadow:0 0 14px var(--cyan);animation:pulse 2s infinite}
+.ms .card{padding:20px 24px}
+.ms .hd{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+.ms .hd b{font-family:var(--mono);font-size:14px;color:var(--cyan)}
+.ms .hd h3{margin:0;font-size:17px}
+.ms ul{list-style:none;display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.ms li{font-size:12.5px;padding:4px 10px;border-radius:8px;background:rgba(255,255,255,.035);border:1px solid var(--line);color:var(--muted)}
+.ms li.y{color:var(--green);border-color:rgba(52,211,153,.3)}
+
+footer{margin-top:100px;border-top:1px solid var(--line);padding:40px 0 60px;color:var(--dim);font-size:13px}
+footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+
+@media (max-width:980px){
+  .g3,.g4,.kpis,.stats{grid-template-columns:repeat(2,1fr)}
+  .flow{grid-template-columns:repeat(3,1fr)}.flow::before{display:none}
+  .arch,.vs,.split{grid-template-columns:1fr}.vs .arrow{transform:rotate(90deg);padding:10px}
+  .hero h1{font-size:48px}.nav-links{display:none}
+  .calc{grid-template-columns:1fr}.calc .op{text-align:center}
+  .ds-meta{grid-template-columns:repeat(2,1fr)}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="bg-grid"></div>
+<div class="bg-glow g1"></div><div class="bg-glow g2"></div><div class="bg-glow g3"></div>
+
+<nav>
+  <a class="logo" href="#top"><span class="logo-mark"></span>CrossCheck <small>v0.2</small></a>
+  <div class="nav-links">
+    <a href="#problem">思路</a><a href="#pipeline">流程</a><a href="#arch">架构</a>
+    <a href="#exp1">第一次检验</a><a href="#exp2">第二次检验</a><a href="#insight">发现</a><a href="#platform">平台</a><a href="#roadmap">路线图</a>
+  </div>
+  <a class="gh" href="https://github.com/2024201542/cursor_datalab" target="_blank">GitHub ↗</a>
+</nav>
+
+<!-- ================= HERO ================= -->
+<section class="hero" id="top">
+  <canvas id="net"></canvas>
+  <div class="wrap hero-inner">
+    <span class="badge"><i></i>DeepSeek · Kimi · 千问 · GLM 真实接入 · 2026.09 实测</span>
+    <h1><span class="grad">让 AI 互相检查</span><span class="sub">多模型互检分类系统 CrossCheck</span></h1>
+    <p class="lead">不同大模型的分类标准和准确率各不相同，任何一家都不能完全信任。CrossCheck 让多个异构模型独立判断、匿名互评、加权投票、仲裁兜底，并用金标准量化每一步到底带来了多少提升，最后把真正有争议的样本交给人。</p>
+    <div class="cta">
+      <a class="btn pri" href="#exp1">查看两次检验结果 →</a>
+      <a class="btn sec" href="#pipeline">了解工作流程</a>
+    </div>
+    <div class="stats reveal">
+      <div class="stat"><div class="v" data-count="4">0</div><div class="k">家异构大模型（3 投票 + 1 仲裁）</div></div>
+      <div class="stat"><div class="v" data-count="5">0</div><div class="k">个分类任务（客服 / 新闻 / 年报 / 美联储 / 股吧）</div></div>
+      <div class="stat"><div class="v" data-count="660">0</div><div class="k">条带真实标签的金标准样本</div></div>
+      <div class="stat"><div class="v" data-count="78" data-suffix="%">0</div><div class="k">的样本首轮一致，可自动放行</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= PROBLEM ================= -->
+<section id="problem">
+  <div class="wrap">
+    <div class="tag reveal">01 · Why cross-check</div>
+    <h2 class="reveal">单个 AI 做分类，<span class="grad">问题在哪？</span></h2>
+    <p class="lead reveal">同一条文本交给不同模型，常常得到不同答案，而且每个模型都“很自信”。我们无法事先知道哪家在当前任务上最准，也无法知道哪些样本判错了。</p>
+    <div class="vs">
+      <div class="card reveal">
+        <span class="chip p">单模型直接分类</span>
+        <ul>
+          <li><span class="x">✕</span><span><b>标准不一</b>：各家对类别边界的理解不同，换个模型结果就变</span></li>
+          <li><span class="x">✕</span><span><b>错而不自知</b>：自报置信度普遍偏高，判错时也给 0.9</span></li>
+          <li><span class="x">✕</span><span><b>没有最强者</b>：实测 4 个任务里，最佳模型在千问和 DeepSeek 之间来回换</span></li>
+          <li><span class="x">✕</span><span><b>无从抽检</b>：不知道该让人去看哪些样本，只能全量复查或完全不查</span></li>
+        </ul>
+      </div>
+      <div class="arrow reveal">⟶</div>
+      <div class="card reveal">
+        <span class="chip g">CrossCheck 多模型互检</span>
+        <ul>
+          <li><span class="ok">✓</span><span><b>统一标准</b>：类别定义、正反例、边界规则写进配置，所有模型共用一份</span></li>
+          <li><span class="ok">✓</span><span><b>分歧即信号</b>：多个模型意见是否一致，是比自报置信度更可靠的质量指标</span></li>
+          <li><span class="ok">✓</span><span><b>不押注单一模型</b>：投票让结果稳定在各家之间，不怕选错模型</span></li>
+          <li><span class="ok">✓</span><span><b>精准转人工</b>：只把约 22% 的分歧样本交给人审核，其余自动放行</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= PIPELINE ================= -->
+<section id="pipeline">
+  <div class="wrap">
+    <div class="tag reveal">02 · Pipeline</div>
+    <h2 class="reveal">一条样本的<span class="grad">六道关卡</span></h2>
+    <p class="lead reveal">分层决策：能在前面解决的不往后传。越往后成本越高、调用越少，最后一关是人。</p>
+    <div class="flow">
+      <div class="step reveal"><div class="dot">01</div><h4>独立分类</h4><p>3 个投票模型并行作答，输出标签、置信度与理由</p></div>
+      <div class="step reveal"><div class="dot">02</div><h4>一致性判定</h4><p>三家一致直接采纳，不再额外调用</p></div>
+      <div class="step reveal"><div class="dot">03</div><h4>交叉复核</h4><p>匿名展示他人意见和理由，并提示“不要盲从”</p></div>
+      <div class="step reveal"><div class="dot">04</div><h4>加权投票</h4><p>按模型权重 × 置信度计票，超过阈值采纳</p></div>
+      <div class="step reveal"><div class="dot">05</div><h4>仲裁模型</h4><p>GLM 查看全部意见后裁决，高置信才采纳</p></div>
+      <div class="step reveal"><div class="dot">06</div><h4>人工兜底</h4><p>仍不确定的进入人工审核页，结果回流金标准</p></div>
+    </div>
+    <div class="grid g3 modes">
+      <div class="card reveal mode"><span class="chip v">review</span><div><h3>分歧 → 交叉复核</h3><p>默认策略。让模型看到彼此的理由再改判，适合标准清晰、分歧多由粗心造成的任务。</p></div></div>
+      <div class="card reveal mode"><span class="chip c">arbiter</span><div><h3>分歧 → 直接仲裁</h3><p>跳过复核，避免“从众收敛”，由独立的第四个模型拍板。</p></div></div>
+      <div class="card reveal mode"><span class="chip p">human</span><div><h3>分歧 → 直接转人工</h3><p>最稳妥。基于实测结论新增的策略，适合对准确率要求高的场景。</p></div></div>
+    </div>
+
+    <div class="term reveal" id="term">
+      <div class="term-bar"><i></i><i></i><i></i><span>crosscheck · 真实运行记录 · FinFE #finfe1194</span></div>
+      <div class="term-body">
+        <div class="tl" style="transition-delay:.1s"><span class="muted">$</span> 输入 「业绩比登海种业高1倍，盘子一半，股价低30%，」 <span class="muted">金标准 =</span> <span class="l-pos">积极</span></div>
+        <div class="tl h" style="transition-delay:.5s">▸ ROUND 1 · 独立分类</div>
+        <div class="tl" style="transition-delay:.8s"><span class="who">DeepSeek</span><span class="lab l-neu">中性 0.90</span><span class="why">“仅陈述业绩、盘子、股价的对比事实，未表达看多或看空态度”</span></div>
+        <div class="tl" style="transition-delay:1.1s"><span class="who">Kimi</span><span class="lab l-neu">中性 0.75</span><span class="why">“纯数据对比陈述，无明确看多或看空态度”</span></div>
+        <div class="tl" style="transition-delay:1.4s"><span class="who">千问</span><span class="lab l-pos">积极 0.85</span><span class="why">“暗示该股票被低估且具备更高性价比，隐含看多”</span></div>
+        <div class="tl warn" style="transition-delay:1.8s">⚠ 首轮 2 : 1 分歧，触发交叉复核（意见匿名为评审员 A / B / C）</div>
+        <div class="tl h" style="transition-delay:2.2s">▸ ROUND 2 · 交叉复核</div>
+        <div class="tl" style="transition-delay:2.5s"><span class="who">DeepSeek</span><span class="lab"><span class="l-neu">中性</span> → <span class="l-pos">积极 0.75</span></span><span class="why">“通过对比暗示该股被低估，隐含看多倾向，符合积极定义”</span></div>
+        <div class="tl" style="transition-delay:2.8s"><span class="who">Kimi</span><span class="lab l-neu">中性 0.80</span><span class="why">“评审员 B 的‘隐含看多’属于过度推断”</span></div>
+        <div class="tl" style="transition-delay:3.1s"><span class="who">千问</span><span class="lab l-pos">积极 0.85</span><span class="why">“强调业绩优、盘子小、股价低，符合看多定义”</span></div>
+        <div class="tl done" style="transition-delay:3.6s">✓ 加权投票 → 积极（置信度 0.67）· 少数派说服了多数派，与金标准一致 <span class="cursor"></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ARCH ================= -->
+<section id="arch">
+  <div class="wrap">
+    <div class="tag reveal">03 · Architecture</div>
+    <h2 class="reveal">配置驱动的<span class="grad">模块化架构</span></h2>
+    <p class="lead reveal">换任务只需换一份 YAML：类别、定义、正反例、边界规则、模型与阈值全部写在配置里，代码不用改。同一套模型配置通过 <span class="mono">base</span> 继承复用到 5 个任务。</p>
+    <div class="arch">
+      <div class="layers reveal">
+        <div class="layer"><div class="ln">交互层</div><div class="mods"><span class="mod">app.py<em>Streamlit 四页平台</em></span><span class="mod">cli.py<em>classify / evaluate / aggregate / ping</em></span></div></div>
+        <div class="layer"><div class="ln">决策层</div><div class="mods"><span class="mod">pipeline.py<em>六道关卡流水线</em></span><span class="mod">prompts.py<em>首轮 / 复核 / 仲裁</em></span><span class="mod">review.py<em>人工审核与回流</em></span></div></div>
+        <div class="layer"><div class="ln">聚合评估层</div><div class="mods"><span class="mod">aggregate.py<em>加权投票 · Dawid-Skene</em></span><span class="mod">evaluate.py<em>Kappa · 混淆矩阵 · 权重</em></span><span class="mod">report.py<em>图表 · HTML 报告</em></span></div></div>
+        <div class="layer"><div class="ln">调用层</div><div class="mods"><span class="mod">llm.py<em>OpenAI 兼容 · Anthropic · mock</em></span><span class="mod">classifier.py<em>解析容错 · 缓存 · 限流</em></span></div></div>
+        <div class="layer"><div class="ln">配置层</div><div class="mods"><span class="mod">config.yaml</span><span class="mod">configs/*.yaml<em>base 继承</em></span><span class="mod">.env<em>API key 仅本地</em></span></div></div>
+      </div>
+      <div class="card reveal">
+        <h3>关键技术点</h3>
+        <div class="feat"><span class="n">01</span><div><b>异步并发 + 双层限流</b><span>httpx 异步调用，全局信号量控制总并发，单模型独立限制并发数与每分钟请求数，避免 429</span></div></div>
+        <div class="feat"><span class="n">02</span><div><b>回复缓存</b><span>按提示词与模型参数的 sha256 缓存，调整报告或重跑评估零成本</span></div></div>
+        <div class="feat"><span class="n">03</span><div><b>输出解析容错</b><span>剥离思考块、正则提取 JSON、标签近似归一化、百分制置信度自动换算</span></div></div>
+        <div class="feat"><span class="n">04</span><div><b>匿名互评防盲从</b><span>复核时隐去模型名，只给理由；提示词明确要求独立判断</span></div></div>
+        <div class="feat"><span class="n">05</span><div><b>统计评估</b><span>Fleiss' Kappa 衡量错误相关性，log-odds 自动算权重，Dawid-Skene 无标签估计准确率</span></div></div>
+      </div>
+    </div>
+    <div class="card reveal" style="margin-top:18px">
+      <h3>模型阵容与接入细节</h3>
+      <table class="mtable">
+        <tr><th>角色</th><th>模型</th><th>接入方式</th><th>踩过的坑</th></tr>
+        <tr><td>投票</td><td class="mono">deepseek-flash</td><td>DeepSeek 官方接口</td><td class="muted">用 <span class="mono">thinking: disabled</span> 关闭思考，速度快、成本低</td></tr>
+        <tr><td>投票</td><td class="mono">kimi-k2.6</td><td>阿里云百炼</td><td class="muted">官方接口新账号限并发 1、每分钟 3 次，温度只能取固定值，改走百炼</td></tr>
+        <tr><td>投票</td><td class="mono">qwen3.7-plus</td><td>阿里云百炼</td><td class="muted">用 <span class="mono">enable_thinking: false</span> 关闭思考</td></tr>
+        <tr><td>仲裁</td><td class="mono">glm-5.3</td><td>阿里云百炼</td><td class="muted">只能开思考，<span class="mono">max_tokens</span> 需调到 2048 防止截断</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ================= EXP 1 ================= -->
+<section id="exp1">
+  <div class="wrap">
+    <div class="exp-head">
+      <div>
+        <div class="tag reveal">04 · First validation</div>
+        <h2 class="reveal">第一次检验：<span class="grad">通用新闻 15 分类</span></h2>
+        <p class="lead reveal">先用自编的 60 条客服消息做冒烟测试：5 个类别、边界规则清晰，三家全部 100%，Kappa = 1.0，互检只起确认作用。为了拉开差距，换用标准更模糊的 CLUE TNEWS 今日头条新闻标题，每类抽 10 条，共 150 条。</p>
+      </div>
+      <div class="exp-no reveal">#1</div>
+    </div>
+    <div class="kpis reveal">
+      <div class="kpi"><div class="v" style="color:var(--blue)">58.0%</div><div class="k">最佳单模型（千问）</div></div>
+      <div class="kpi"><div class="v" style="color:var(--green)">57.3%</div><div class="k">互检系统</div></div>
+      <div class="kpi"><div class="v" style="color:var(--amber)">63.3%</div><div class="k">理论上限（任一模型答对）</div></div>
+      <div class="kpi"><div class="v" style="color:var(--pink)">0.85</div><div class="k">Fleiss' Kappa · 错误高度相关</div></div>
+    </div>
+    <div class="grid g2" style="margin-top:18px">
+      <div class="card reveal">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <h3>单模型 vs 投票 vs 互检系统</h3>
+          <div class="legend"><span><i style="background:var(--blue)"></i>单模型</span><span><i style="background:var(--amber)"></i>投票</span><span><i style="background:var(--green)"></i>互检</span></div>
+        </div>
+        <div class="bc" id="bc-tnews"></div>
+        <p class="bc-cap">蓝色虚线：最佳单模型；黄色虚线：理论上限（三家中任一答对）</p>
+      </div>
+      <div class="card reveal chart" id="split-tnews">
+        <h3>首轮是否一致，决定了准确率</h3>
+        <p>三家首轮一致的样本和有分歧的样本，准确率相差一倍多。</p>
+        <div class="split" style="margin-top:14px">
+          <div class="donut" data-v="119" data-n="150"></div>
+          <div>
+            <div class="hbar"><div class="t"><span>首轮一致 · 119 条</span><b style="color:var(--cyan)">64.7%</b></div><div class="tr"><div class="fl" style="--w:64.7%;background:linear-gradient(90deg,var(--blue),var(--cyan))"></div></div></div>
+            <div class="hbar"><div class="t"><span>首轮分歧 · 31 条</span><b style="color:var(--pink)">29.0%</b></div><div class="tr"><div class="fl" style="--w:29%;background:linear-gradient(90deg,var(--violet),var(--pink))"></div></div></div>
+            <div class="hbar"><div class="t"><span>分歧样本复核后变成一致</span><b style="color:var(--red)">24.0%</b></div><div class="tr"><div class="fl" style="--w:24%;background:linear-gradient(90deg,#be123c,var(--red))"></div></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="grid g3" style="margin-top:18px">
+      <div class="card reveal"><span class="chip a">发现 1</span><h3 style="margin-top:12px">投票提升空间很小</h3><p>三家错误高度相关，理论上限只比最佳单模型高 5.3 个百分点。TNEWS 标签来自头条频道，本身噪声大，进一步压低了上限。</p></div>
+      <div class="card reveal"><span class="chip c">发现 2</span><h3 style="margin-top:12px">一致性是强质量信号</h3><p>首轮一致的 119 条准确率 64.7%，有分歧的 31 条只有 29.0%。“要不要人工看”可以直接用这个信号来决定。</p></div>
+      <div class="card reveal"><span class="chip p">发现 3</span><h3 style="margin-top:12px">复核会“从众收敛”</h3><p>分歧样本复核后大多变成三家一致，但一致后的准确率只有 24%。据此新增了“分歧直接仲裁 / 转人工”策略。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= EXP 2 ================= -->
+<section id="exp2">
+  <div class="wrap">
+    <div class="exp-head">
+      <div>
+        <div class="tag reveal">05 · Second validation</div>
+        <h2 class="reveal">第二次检验：<span class="grad">经济金融文本</span></h2>
+        <p class="lead reveal">把系统用到经济学“文本即数据”研究中的三个典型场景：上市公司年报、美联储货币政策沟通、散户投资者情绪。三个都是公开的专家标注数据集，每类从测试集分层抽 50 条、共 150 条作为金标准，训练集只用来挑提示词示例。</p>
+      </div>
+      <div class="exp-no reveal">#2</div>
+    </div>
+    <div class="tabs reveal" id="tabs">
+      <button class="on" data-k="climate">年报气候段落</button>
+      <button data-k="fomc">美联储 FOMC</button>
+      <button data-k="finfe">股吧情绪</button>
+    </div>
+    <div class="ds-meta reveal" id="ds-meta"></div>
+    <div class="grid g2">
+      <div class="card reveal">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <h3>准确率对比</h3>
+          <div class="legend"><span><i style="background:var(--blue)"></i>单模型</span><span><i style="background:var(--amber)"></i>投票</span><span><i style="background:var(--green)"></i>互检</span></div>
+        </div>
+        <div class="bc" id="bc-econ"></div>
+        <p class="bc-cap">蓝色虚线：最佳单模型；黄色虚线：理论上限（三家中任一答对）</p>
+      </div>
+      <div class="card reveal chart" id="econ-side">
+        <h3>混淆矩阵 <span class="muted" style="font-size:13px;font-weight:400">行 = 真实标签，列 = 系统判断</span></h3>
+        <div id="cm"></div>
+        <h3 style="margin-top:22px">交叉复核前后，单模型准确率</h3>
+        <div class="rv" id="rv"></div>
+        <p id="ds-note" style="margin-top:16px"></p>
+      </div>
+    </div>
+
+    <div class="card reveal chart" style="margin-top:18px" id="dumbbell">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <h3>四个真实任务：首轮一致 vs 首轮分歧的准确率</h3>
+        <div class="legend"><span><i style="background:var(--cyan)"></i>首轮三家一致</span><span><i style="background:var(--pink)"></i>首轮有分歧</span></div>
+      </div>
+      <p>规律在所有任务上都成立：分歧样本的准确率比一致样本低 30 到 40 个百分点。</p>
+      <div id="db" style="margin-top:18px"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= INSIGHT ================= -->
+<section id="insight">
+  <div class="wrap">
+    <div class="tag reveal">06 · Insights</div>
+    <h2 class="reveal">两次检验，<span class="grad">四条核心结论</span></h2>
+    <div class="grid g2" style="margin-top:36px">
+      <div class="card ins reveal"><span class="no">01</span><span class="chip a">投票 ≠ 更准</span>
+        <div class="big" style="color:var(--amber)">κ 0.76–0.85</div>
+        <p>现代大模型的训练数据和对齐方式高度相似，错误高度相关。投票结果总是落在最好和最差的模型之间，不能稳定地超过最佳单模型。</p></div>
+      <div class="card ins reveal"><span class="no">02</span><span class="chip c">不押注单一模型</span>
+        <div class="big" style="color:var(--cyan)">2 : 2</div>
+        <p>4 个任务里，千问赢了 2 个（新闻、年报），DeepSeek 赢了 2 个（美联储、股吧）。事先无法知道谁最强，互检让结果稳定，不会因为选错模型而垫底。</p></div>
+      <div class="card ins reveal"><span class="no">03</span><span class="chip g">分歧是最有价值的信号</span>
+        <div class="big" style="color:var(--green)">75% vs 41%</div>
+        <p>合计 600 条样本中，首轮一致的 469 条准确率 75.3%，分歧的 131 条只有 41.2%。互检真正的价值是精准找出该给人看的样本。</p></div>
+      <div class="card ins reveal"><span class="no">04</span><span class="chip p">标注规则决定上限</span>
+        <div class="big" style="color:var(--pink)">20 / 50</div>
+        <p>FOMC 数据集规定“描述经济强劲”也算鹰派，50 条鹰派句有 20 条被判成中性；股吧数据里“今天能涨停算我输”被标为中性。规则和标签质量比模型数量更重要。</p></div>
+    </div>
+    <div class="card reveal" style="margin-top:18px">
+      <h3>把“分歧”交给人：花 22% 的人工，换 13 个百分点</h3>
+      <p>四个真实任务合计 600 条。假设人工审核分歧样本时判断与金标准一致：</p>
+      <div class="calc">
+        <div class="box"><b style="color:var(--muted)">67.8%</b><span>全自动互检系统</span></div>
+        <div class="op">+</div>
+        <div class="box"><b style="color:var(--pink)">131 条</b><span>只人工审核首轮分歧样本（21.8%）</span></div>
+        <div class="op">=</div>
+        <div class="box" style="border-color:rgba(52,211,153,.4);box-shadow:0 0 30px -10px rgba(52,211,153,.5)"><b style="color:var(--green)">80.7%</b><span>整体准确率，其余 78% 自动放行</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= PLATFORM ================= -->
+<section id="platform">
+  <div class="wrap">
+    <div class="tag reveal">07 · Platform</div>
+    <h2 class="reveal">不写命令也能用的<span class="grad">本地网页平台</span></h2>
+    <p class="lead reveal">基于 Streamlit，<span class="mono">streamlit run app.py</span> 即可打开。API key 只保存在本地 <span class="mono">.env</span>，页面上只显示后 4 位。</p>
+    <div class="grid g4" style="margin-top:36px">
+      <div class="reveal">
+        <div class="win"><div class="win-bar"><i></i><i></i><i></i>① 模型配置</div>
+          <div class="win-body">
+            <div class="fake-row"><div class="fake c" style="width:30%"></div><div class="fake" style="width:50%"></div><div class="fake g" style="width:14%"></div></div>
+            <div class="fake-row"><div class="fake c" style="width:24%"></div><div class="fake" style="width:56%"></div><div class="fake g" style="width:14%"></div></div>
+            <div class="fake-row"><div class="fake c" style="width:28%"></div><div class="fake" style="width:52%"></div><div class="fake g" style="width:14%"></div></div>
+            <div class="fake-row"><div class="fake v" style="width:22%"></div><div class="fake" style="width:58%"></div><div class="fake p" style="width:14%"></div></div>
+          </div></div>
+        <h3 style="margin-top:16px;font-size:16px">模型配置</h3><p class="muted" style="font-size:13.5px">表格编辑模型、接口地址、权重、限流，区分投票与仲裁角色，一键测试连通性。</p>
+      </div>
+      <div class="reveal">
+        <div class="win"><div class="win-bar"><i></i><i></i><i></i>② 分类任务</div>
+          <div class="win-body">
+            <div class="fake-row"><div class="fake v" style="width:18%"></div><div class="fake" style="width:76%"></div></div>
+            <div class="fake-row"><div class="fake v" style="width:18%"></div><div class="fake" style="width:64%"></div></div>
+            <div class="fake-row"><div class="fake v" style="width:18%"></div><div class="fake" style="width:70%"></div></div>
+            <div class="fake-row"><div class="fake a" style="width:96%;background:rgba(251,191,36,.25)"></div></div>
+          </div></div>
+        <h3 style="margin-top:16px;font-size:16px">分类任务</h3><p class="muted" style="font-size:13.5px">编辑类别定义、正反例和边界规则，实时预览最终发给模型的提示词。</p>
+      </div>
+      <div class="reveal">
+        <div class="win"><div class="win-bar"><i></i><i></i><i></i>③ 运行与结果</div>
+          <div class="win-body">
+            <div class="fake-row"><div class="fake g" style="width:72%"></div><div class="fake" style="width:24%"></div></div>
+            <div class="mini-bars"><i style="height:60%"></i><i style="height:52%"></i><i style="height:74%"></i><i style="height:66%"></i><i style="height:66%"></i><i style="height:70%"></i></div>
+          </div></div>
+        <h3 style="margin-top:16px;font-size:16px">运行与结果</h3><p class="muted" style="font-size:13.5px">上传 CSV / Excel，自动识别列，实时进度；有标签时输出准确率对比、分类别图、混淆矩阵和判错明细。</p>
+      </div>
+      <div class="reveal">
+        <div class="win"><div class="win-bar"><i></i><i></i><i></i>④ 人工审核</div>
+          <div class="win-body">
+            <div class="fake-row"><div class="fake" style="width:100%;height:28px;border-radius:8px"></div></div>
+            <div class="fake-row"><div class="fake p" style="width:30%"></div><div class="fake c" style="width:30%"></div><div class="fake" style="width:30%"></div></div>
+            <div class="fake-row"><div class="fake g" style="width:46%;height:18px"></div><div class="fake" style="width:46%;height:18px"></div></div>
+          </div></div>
+        <h3 style="margin-top:16px;font-size:16px">人工审核</h3><p class="muted" style="font-size:13.5px">逐条或表格批量审核分歧样本，随机抽检一致样本，导出最终结果并回流为金标准。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ROADMAP ================= -->
+<section id="roadmap">
+  <div class="wrap">
+    <div class="tag reveal">08 · Roadmap</div>
+    <h2 class="reveal">从实验工具到<span class="grad">生产系统</span></h2>
+    <div class="road">
+      <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.1</b><h3>基础实现</h3><span class="chip g">已完成</span></div>
+        <ul><li class="y">配置驱动</li><li class="y">并行独立分类</li><li class="y">匿名交叉复核</li><li class="y">加权投票 · 仲裁 · 人工兜底</li><li class="y">Kappa · 混淆矩阵 · 自动权重</li><li class="y">Dawid-Skene</li><li class="y">缓存 · 限流 · 重试</li><li class="y">4 家真实模型接入</li></ul></div></div>
+      <div class="ms doing reveal"><div class="card"><div class="hd"><b>v0.2</b><h3>Web 平台</h3><span class="chip c">基础版已完成</span></div>
+        <ul><li class="y">页面配置模型与任务</li><li class="y">上传文件 · 图表结果</li><li class="y">分歧处理策略开关</li><li class="y">人工审核页</li><li>历史运行记录</li><li>多次运行对比</li></ul></div></div>
+      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.3</b><h3>成本与稳定性</h3></div>
+        <ul><li>级联调用：便宜模型先判</li><li>断点续跑</li><li>Token 与费用统计</li><li>选项顺序随机化</li></ul></div></div>
+      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.4</b><h3>更强的聚合与校准</h3></div>
+        <ul><li>按类别的权重</li><li>置信度校准</li><li>Self-Consistency</li><li>Logprobs 置信度</li><li>动态阈值搜索</li></ul></div></div>
+      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.5</b><h3>高级协作模式</h3></div>
+        <ul><li>多轮辩论</li><li>魔鬼代言人对抗从众</li><li>证据引用</li><li>评审团模式（PoLL）</li><li>多标签 / 层级分类</li></ul></div></div>
+      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.6</b><h3>闭环自进化</h3></div>
+        <ul><li>动态 Few-shot（RAG）</li><li>分歧模式分析改规则</li><li>DSPy 提示词优化</li><li>主动学习</li><li>cleanlab 标签噪声检测</li></ul></div></div>
+      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.7</b><h3>蒸馏与工程化</h3></div>
+        <ul><li>小模型蒸馏</li><li>FastAPI 服务</li><li>质量漂移监控</li><li>本地模型 Ollama / vLLM</li></ul></div></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div><b style="color:var(--text)">CrossCheck</b> · 多模型互检分类系统 · 2026</div>
+    <div>数据集：CLUE TNEWS · ClimateBERT climate_sentiment (CC BY-NC-SA 4.0) · Trillion Dollar Words (CC BY-NC 4.0) · BBT-FinCUGE FinFE</div>
+  </div>
+</footer>
+
+<script>
+const MODELS = ["DeepSeek", "Kimi", "千问", "多数投票", "加权投票", "互检系统"];
+const KINDS = ["m", "m", "m", "e", "e", "s"];
+
+const DATA = {
+  tnews: { name: "TNEWS 新闻", bars: [56.7, 55.3, 58.0, 55.3, 55.3, 57.3], upper: 63.3, cons: [119, 64.7], dis: [31, 29.0], kappa: 0.851 },
+  climate: {
+    name: "年报气候段落", bars: [79.3, 83.3, 86.0, 84.7, 84.7, 83.3], upper: 92.0, cons: [118, 91.5], dis: [32, 53.1], kappa: 0.786,
+    labels: ["风险", "机遇", "中性"], cm: [[42, 1, 7], [0, 42, 8], [6, 3, 41]],
+    rv: [[79.3, 83.3], [83.3, 80.0], [86.0, 82.0]],
+    meta: [["经济学领域", "ESG · 气候金融"], ["文本来源", "上市公司年报、可持续发展报告（英文段落）"], ["数据集", "ClimateBERT climate_sentiment"], ["规模", "训练 1000 · 测试 320"]],
+    note: "三个任务中表现最好：年报段落篇幅长、语境完整，千问达到 86.0%。首轮一致的 118 条准确率高达 91.5%，可以放心自动采纳。可用于度量企业的气候风险暴露、识别“漂绿”。",
+  },
+  fomc: {
+    name: "美联储 FOMC", bars: [65.3, 62.0, 60.7, 61.3, 61.3, 62.0], upper: 73.3, cons: [115, 69.6], dis: [35, 37.1], kappa: 0.756,
+    labels: ["鹰派", "鸽派", "中性"], cm: [[27, 3, 20], [2, 33, 15], [6, 11, 33]],
+    rv: [[65.3, 60.7], [62.0, 61.3], [60.7, 61.3]],
+    meta: [["经济学领域", "货币经济学"], ["文本来源", "FOMC 会议纪要、发布会、官员讲话（英文句子）"], ["数据集", "Trillion Dollar Words · ACL 2023"], ["规模", "训练 1984 · 测试 496"]],
+    note: "最难的任务。数据集的标注指南规定“描述经济强劲、通胀上升”也算鹰派（暗示未来加息），模型更倾向于判为中性，50 条鹰派句中有 20 条被判错。复核后 DeepSeek 反而从 65.3% 降到 60.7%。",
+  },
+  finfe: {
+    name: "股吧情绪", bars: [70.0, 68.0, 67.3, 68.0, 68.0, 68.7], upper: 79.3, cons: [117, 75.2], dis: [33, 45.5], kappa: 0.773,
+    labels: ["积极", "消极", "中性"], cm: [[33, 8, 9], [3, 42, 5], [5, 17, 28]],
+    rv: [[70.0, 68.7], [68.0, 67.3], [67.3, 67.3]],
+    meta: [["经济学领域", "行为金融 · 投资者情绪"], ["文本来源", "股吧、财经社交媒体散户发帖（中文）"], ["数据集", "BBT-FinCUGE FinFE"], ["规模", "训练 16157 · 验证 2020"]],
+    note: "主要错误是把中性帖判为消极（17 条），股吧里反讽和调侃很多，也存在标注噪声，例如“今天能涨停算我输”被标为中性。可用于构建投资者情绪指数，研究情绪与收益率、成交量的关系。",
+  },
+};
+
+function renderBars(el, d) {
+  const lo = Math.max(0, Math.floor((Math.min(...d.bars) - 12) / 10) * 10);
+  const pos = v => ((v - lo) / (100 - lo)) * 100;
+  const best = Math.max(...d.bars.slice(0, 3));
+  let ticks = "";
+  for (let t = lo; t <= 100; t += 10) ticks += `<div class="bc-tick" style="bottom:${pos(t)}%"><span>${t}</span></div>`;
+  const cols = d.bars.map((v, i) =>
+    `<div class="bc-col"><div class="bc-bar k-${KINDS[i]}" style="--h:${pos(v)}%"><b>${v.toFixed(1)}%</b></div><span class="bc-name">${MODELS[i]}</span></div>`).join("");
+  el.classList.remove("go");
+  el.innerHTML = `<div class="bc-plot">${ticks}
+    <div class="bc-ref best" style="bottom:${pos(best)}%"><em>最佳 ${best.toFixed(1)}%</em></div>
+    <div class="bc-ref up" style="bottom:${pos(d.upper)}%"><em>上限 ${d.upper.toFixed(1)}%</em></div>
+    <div class="bc-bars">${cols}</div></div>`;
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add("go")));
+}
+
+function renderCM(el, d) {
+  const n = d.labels.length;
+  const rowMax = d.cm.map(r => r.reduce((a, b) => a + b, 0));
+  let html = `<div class="cm" style="grid-template-columns:52px repeat(${n},1fr)"><div></div>`;
+  html += d.labels.map(l => `<div class="h">${l}</div>`).join("");
+  d.cm.forEach((row, i) => {
+    html += `<div class="h rh">${d.labels[i]}</div>`;
+    row.forEach((v, j) => {
+      const a = v / rowMax[i];
+      const diag = i === j;
+      const bg = diag ? `rgba(52,211,153,${0.12 + a * 0.6})` : `rgba(244,114,182,${a * 1.4})`;
+      html += `<div class="c${diag ? " d" : ""}" style="background:${bg}">${v}</div>`;
+    });
+  });
+  el.innerHTML = html + "</div>";
+}
+
+function renderRV(el, d) {
+  el.innerHTML = d.rv.map(([a, b], i) => {
+    const cls = b > a ? "up" : b < a ? "dn" : "eq";
+    const sym = b > a ? "▲" : b < a ? "▼" : "＝";
+    return `<div><small>${MODELS[i]}</small><span>${a.toFixed(1)} → <b class="${cls}">${b.toFixed(1)}% ${sym}</b></span></div>`;
+  }).join("");
+}
+
+function showDataset(k) {
+  const d = DATA[k];
+  document.getElementById("ds-meta").innerHTML = d.meta.map(([a, b]) => `<div><small>${a}</small><span>${b}</span></div>`).join("");
+  renderBars(document.getElementById("bc-econ"), d);
+  renderCM(document.getElementById("cm"), d);
+  renderRV(document.getElementById("rv"), d);
+  document.getElementById("ds-note").textContent = d.note;
+}
+
+function renderDumbbell(el) {
+  const rows = ["tnews", "climate", "fomc", "finfe"].map(k => {
+    const d = DATA[k];
+    const lo = d.dis[1], hi = d.cons[1];
+    return `<div class="db-row">
+      <div class="db-name"><b>${d.name}</b><span>一致 ${d.cons[0]} 条 · 分歧 ${d.dis[0]} 条</span></div>
+      <div class="db-track">
+        <div class="db-line" style="left:${lo}%;width:${hi - lo}%"></div>
+        <div class="db-dot p" style="left:${lo}%"><em>${lo.toFixed(1)}%</em></div>
+        <div class="db-dot c" style="left:${hi}%"><em>${hi.toFixed(1)}%</em></div>
+      </div></div>`;
+  }).join("");
+  el.innerHTML = rows + `<div class="db-axis"><span></span><div><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div></div>`;
+}
+
+function renderDonuts() {
+  document.querySelectorAll(".donut").forEach(el => {
+    const v = +el.dataset.v, n = +el.dataset.n, r = 84, c = 2 * Math.PI * r;
+    el.innerHTML = `<svg width="200" height="200" viewBox="0 0 200 200">
+      <defs><linearGradient id="dg" x1="0" x2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#a78bfa"/></linearGradient></defs>
+      <circle class="trk" cx="100" cy="100" r="${r}"/>
+      <circle class="val" cx="100" cy="100" r="${r}" stroke-dasharray="${c}" stroke-dashoffset="${c}" data-off="${c * (1 - v / n)}"/></svg>
+      <div class="ctr"><div><b>${Math.round((v / n) * 100)}%</b><span>首轮一致</span></div></div>`;
+  });
+}
+
+function countUp(el) {
+  const target = +el.dataset.count, suf = el.dataset.suffix || "", t0 = performance.now(), dur = 1400;
+  const tick = now => {
+    const p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+    el.textContent = Math.round(target * e) + suf;
+    if (p < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+/* reveal & chart triggers */
+const io = new IntersectionObserver(entries => {
+  entries.forEach(en => {
+    if (!en.isIntersecting) return;
+    const el = en.target;
+    el.classList.add("in");
+    if (el.classList.contains("chart")) el.classList.add("go");
+    if (el.id === "term") el.classList.add("go");
+    el.querySelectorAll("[data-count]").forEach(countUp);
+    el.querySelectorAll(".donut .val").forEach(c => c.style.strokeDashoffset = c.dataset.off);
+    const bc = el.querySelector(".bc");
+    if (bc && !bc.dataset.done) { bc.dataset.done = 1; renderBars(bc, bc.id === "bc-tnews" ? DATA.tnews : DATA[currentTab]); }
+    io.unobserve(el);
+  });
+}, { threshold: 0.18 });
+
+let currentTab = "climate";
+renderDonuts();
+renderDumbbell(document.getElementById("db"));
+showDataset(currentTab);
+document.getElementById("bc-econ").classList.remove("go");
+document.querySelectorAll(".reveal, .chart").forEach(el => io.observe(el));
+
+document.querySelectorAll("#tabs button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("#tabs button").forEach(x => x.classList.toggle("on", x === b));
+  currentTab = b.dataset.k;
+  showDataset(currentTab);
+}));
+
+/* nav: progress bar + scrollspy */
+const links = [...document.querySelectorAll(".nav-links a")];
+addEventListener("scroll", () => {
+  const h = document.documentElement;
+  document.getElementById("progress").style.width = (h.scrollTop / (h.scrollHeight - h.clientHeight)) * 100 + "%";
+  let cur = "";
+  document.querySelectorAll("section[id]").forEach(s => { if (s.getBoundingClientRect().top < 160) cur = s.id; });
+  links.forEach(a => a.classList.toggle("on", a.getAttribute("href") === "#" + cur));
+}, { passive: true });
+
+/* hero network: nodes = models exchanging opinions */
+(() => {
+  const cv = document.getElementById("net"), ctx = cv.getContext("2d");
+  const colors = ["34,211,238", "167,139,250", "244,114,182", "96,165,250"];
+  let W, H, pts, dpr = Math.min(2, devicePixelRatio || 1);
+  const resize = () => {
+    W = cv.offsetWidth; H = cv.offsetHeight; cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const n = Math.round(Math.min(90, (W * H) / 16000));
+    pts = Array.from({ length: n }, (_, i) => ({
+      x: Math.random() * W, y: Math.random() * H, vx: (Math.random() - .5) * .35, vy: (Math.random() - .5) * .35,
+      r: i < 4 ? 3.2 : Math.random() * 1.6 + .6, c: colors[i % 4], hub: i < 4,
+    }));
+  };
+  resize(); addEventListener("resize", resize);
+  const mouse = { x: -999, y: -999 };
+  cv.parentElement.addEventListener("mousemove", e => { const r = cv.getBoundingClientRect(); mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top; });
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const frame = () => {
+    ctx.clearRect(0, 0, W, H);
+    for (const p of pts) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < 0 || p.x > W) p.vx *= -1;
+      if (p.y < 0 || p.y > H) p.vy *= -1;
+      const dx = p.x - mouse.x, dy = p.y - mouse.y, dm = Math.hypot(dx, dy);
+      if (dm < 120) { p.x += dx / dm * .8; p.y += dy / dm * .8; }
+    }
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+      const a = pts[i], b = pts[j], d = Math.hypot(a.x - b.x, a.y - b.y), lim = a.hub || b.hub ? 220 : 130;
+      if (d < lim) {
+        ctx.strokeStyle = `rgba(${a.hub ? a.c : b.c},${(1 - d / lim) * (a.hub || b.hub ? .35 : .18)})`;
+        ctx.lineWidth = a.hub || b.hub ? 1 : .6;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+    }
+    for (const p of pts) {
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7);
+      ctx.fillStyle = `rgba(${p.c},${p.hub ? 1 : .7})`;
+      if (p.hub) { ctx.shadowColor = `rgb(${p.c})`; ctx.shadowBlur = 18; }
+      ctx.fill(); ctx.shadowBlur = 0;
+    }
+    if (!reduce) requestAnimationFrame(frame);
+  };
+  frame();
+})();
+</script>
+</body>
+</html>
