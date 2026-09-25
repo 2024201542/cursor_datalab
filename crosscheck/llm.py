@@ -156,9 +156,36 @@ class MockLLM(BaseLLM):
         )
 
 
+class LocalLLM(BaseLLM):
+    """在训练集上训练的 TF-IDF + 逻辑回归分类器，伪装成聊天模型参与投票。
+
+    它不阅读提示词里的分类标准和他人意见，只看 <text> 中的原文，所以复核轮次会坚持原判。
+    """
+
+    cacheable = False
+
+    def __init__(self, cfg: ModelConfig, config: Config):
+        super().__init__(cfg)
+        from .local_model import get_classifier
+
+        fs = config.fewshot
+        path = cfg.train_path or fs.path
+        self.clf = get_classifier(str(path), tuple(config.task.label_names), fs.text_col, fs.label_col)
+
+    async def chat(self, system: str, user: str) -> str:
+        m = _TEXT_RE.search(user)
+        label, prob = self.clf.predict(m.group(1) if m else user)
+        return json.dumps(
+            {"label": label, "confidence": round(prob, 3), "reason": f"训练集分类器预测概率 {prob:.2f}"},
+            ensure_ascii=False,
+        )
+
+
 def create_llm(cfg: ModelConfig, http: httpx.AsyncClient, config: Config) -> BaseLLM:
     if cfg.provider == "mock":
         return MockLLM(cfg, config.task.label_names, config.mock_keywords)
+    if cfg.provider == "local":
+        return LocalLLM(cfg, config)
     if cfg.provider == "anthropic":
         return AnthropicLLM(cfg, http, config.pipeline.max_retries)
     return OpenAICompatLLM(cfg, http, config.pipeline.max_retries)

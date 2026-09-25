@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-PROVIDERS = ("openai", "anthropic", "mock")
+PROVIDERS = ("openai", "anthropic", "local", "mock")
 DISAGREEMENT_ACTIONS = {
     "review": "交叉复核后投票，仍不通过再仲裁",
     "arbiter": "跳过复核，直接交给仲裁模型",
@@ -52,6 +52,7 @@ class ModelConfig:
     max_concurrency: int = 0
     rpm: int = 0
     mock_accuracy: float = 0.8
+    train_path: str = ""  # provider=local 时的训练集；留空则用 fewshot.path
     enabled: bool = True
 
     def resolve_api_key(self) -> str:
@@ -82,6 +83,20 @@ class CacheConfig:
 
 
 @dataclass
+class FewShotConfig:
+    """动态示例：为每条待分类文本从训练集中检索最相似的 k 条已标注样本放进提示词。"""
+    path: str = ""
+    k: int = 6
+    text_col: str = "text"
+    label_col: str = "label"
+    max_chars: int = 300
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.path) and self.k > 0
+
+
+@dataclass
 class Config:
     task: TaskConfig
     models: list[ModelConfig]
@@ -89,6 +104,7 @@ class Config:
     pipeline: PipelineConfig
     cache: CacheConfig
     mock_keywords: dict[str, list[str]]
+    fewshot: FewShotConfig = field(default_factory=FewShotConfig)
 
 
 def load_dotenv(path: str | Path = ".env") -> None:
@@ -175,11 +191,13 @@ def config_from_dict(raw: dict, mock: bool = False) -> Config:
         pipeline=_build(PipelineConfig, raw.get("pipeline") or {}, "pipeline"),
         cache=_build(CacheConfig, raw.get("cache") or {}, "cache"),
         mock_keywords=(raw.get("mock") or {}).get("keywords") or {},
+        fewshot=_build(FewShotConfig, raw.get("fewshot") or {}, "fewshot"),
     )
 
     if mock:
         for m in config.models + ([config.arbiter] if config.arbiter else []):
-            m.provider = "mock"
+            if m.provider != "local":
+                m.provider = "mock"
 
     _validate(config)
     return config
@@ -203,6 +221,10 @@ def _validate(config: Config) -> None:
             raise ValueError(f"模型 {m.name} 的 provider 必须是 {PROVIDERS} 之一，实际是 {m.provider!r}")
         if m.weight <= 0:
             raise ValueError(f"模型 {m.name} 的 weight 必须大于 0")
+        if m.provider == "local" and not (m.train_path or config.fewshot.path):
+            raise ValueError(f"本地模型 {m.name} 需要 train_path（或配置 fewshot.path）作为训练集")
+    if config.arbiter and config.arbiter.provider == "local":
+        raise ValueError("仲裁模型不能是本地模型（它无法阅读其他评审员的意见）")
 
     unknown = set(config.mock_keywords) - set(names)
     if unknown:

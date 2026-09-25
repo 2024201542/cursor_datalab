@@ -309,7 +309,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
   <a class="logo" href="#top"><span class="logo-mark"></span>CrossCheck <small>v0.2</small></a>
   <div class="nav-links">
     <a href="#problem">思路</a><a href="#pipeline">流程</a><a href="#arch">架构</a>
-    <a href="#exp1">第一次检验</a><a href="#exp2">第二次检验</a><a href="#insight">发现</a><a href="#platform">平台</a><a href="#roadmap">路线图</a>
+    <a href="#exp1">第一次检验</a><a href="#exp2">第二次检验</a><a href="#exp3">改进</a><a href="#insight">发现</a><a href="#platform">平台</a><a href="#roadmap">路线图</a>
   </div>
   <a class="gh" href="https://github.com/2024201542/cursor_datalab" target="_blank">GitHub ↗</a>
 </nav>
@@ -322,7 +322,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
     <h1><span class="grad">让 AI 互相检查</span><span class="sub">多模型互检分类系统 CrossCheck</span></h1>
     <p class="lead">不同大模型的分类标准和准确率各不相同，任何一家都不能完全信任。CrossCheck 让多个异构模型独立判断、匿名互评、加权投票、仲裁兜底，并用金标准量化每一步到底带来了多少提升，最后把真正有争议的样本交给人。</p>
     <div class="cta">
-      <a class="btn pri" href="#exp1">查看两次检验结果 →</a>
+      <a class="btn pri" href="#exp1">查看三次检验结果 →</a>
       <a class="btn sec" href="#pipeline">了解工作流程</a>
     </div>
     <div class="stats reveal">
@@ -371,7 +371,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
     <h2 class="reveal">一条样本的<span class="grad">六道关卡</span></h2>
     <p class="lead reveal">分层决策：能在前面解决的不往后传。越往后成本越高、调用越少，最后一关是人。</p>
     <div class="flow">
-      <div class="step reveal"><div class="dot">01</div><h4>独立分类</h4><p>3 个投票模型并行作答，输出标签、置信度与理由</p></div>
+      <div class="step reveal"><div class="dot">01</div><h4>独立分类</h4><p>3 个大模型并行作答，提示词附带最相似的已标注样本；可加本地小模型当第 4 票</p></div>
       <div class="step reveal"><div class="dot">02</div><h4>一致性判定</h4><p>三家一致直接采纳，不再额外调用</p></div>
       <div class="step reveal"><div class="dot">03</div><h4>交叉复核</h4><p>匿名展示他人意见和理由，并提示“不要盲从”</p></div>
       <div class="step reveal"><div class="dot">04</div><h4>加权投票</h4><p>按模型权重 × 置信度计票，超过阈值采纳</p></div>
@@ -379,9 +379,9 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
       <div class="step reveal"><div class="dot">06</div><h4>人工兜底</h4><p>仍不确定的进入人工审核页，结果回流金标准</p></div>
     </div>
     <div class="grid g3 modes">
-      <div class="card reveal mode"><span class="chip v">review</span><div><h3>分歧 → 交叉复核</h3><p>默认策略。让模型看到彼此的理由再改判，适合标准清晰、分歧多由粗心造成的任务。</p></div></div>
+      <div class="card reveal mode"><span class="chip v">review</span><div><h3>分歧 → 交叉复核</h3><p>让模型看到彼此的理由再改判。实测改对 13 条、改错 10 条，净收益很小，已不再是默认策略。</p></div></div>
       <div class="card reveal mode"><span class="chip c">arbiter</span><div><h3>分歧 → 直接仲裁</h3><p>跳过复核，避免“从众收敛”，由独立的第四个模型拍板。</p></div></div>
-      <div class="card reveal mode"><span class="chip p">human</span><div><h3>分歧 → 直接转人工</h3><p>最稳妥。基于实测结论新增的策略，适合对准确率要求高的场景。</p></div></div>
+      <div class="card reveal mode"><span class="chip p">human</span><div><h3>分歧 → 直接转人工</h3><p>默认策略。分歧样本准确率只有 41%，把它们交给人工审核页最划算。</p></div></div>
     </div>
 
     <div class="term reveal" id="term">
@@ -414,7 +414,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
         <div class="layer"><div class="ln">交互层</div><div class="mods"><span class="mod">app.py<em>Streamlit 四页平台</em></span><span class="mod">cli.py<em>classify / evaluate / aggregate / ping</em></span></div></div>
         <div class="layer"><div class="ln">决策层</div><div class="mods"><span class="mod">pipeline.py<em>六道关卡流水线</em></span><span class="mod">prompts.py<em>首轮 / 复核 / 仲裁</em></span><span class="mod">review.py<em>人工审核与回流</em></span></div></div>
         <div class="layer"><div class="ln">聚合评估层</div><div class="mods"><span class="mod">aggregate.py<em>加权投票 · Dawid-Skene</em></span><span class="mod">evaluate.py<em>Kappa · 混淆矩阵 · 权重</em></span><span class="mod">report.py<em>图表 · HTML 报告</em></span></div></div>
-        <div class="layer"><div class="ln">调用层</div><div class="mods"><span class="mod">llm.py<em>OpenAI 兼容 · Anthropic · mock</em></span><span class="mod">classifier.py<em>解析容错 · 缓存 · 限流</em></span></div></div>
+        <div class="layer"><div class="ln">调用层</div><div class="mods"><span class="mod">llm.py<em>OpenAI 兼容 · Anthropic · 本地 · mock</em></span><span class="mod">local_model.py<em>相似样本检索 · 本地小模型</em></span><span class="mod">classifier.py<em>解析容错 · 缓存 · 限流</em></span></div></div>
         <div class="layer"><div class="ln">配置层</div><div class="mods"><span class="mod">config.yaml</span><span class="mod">configs/*.yaml<em>base 继承</em></span><span class="mod">.env<em>API key 仅本地</em></span></div></div>
       </div>
       <div class="card reveal">
@@ -532,11 +532,60 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
   </div>
 </section>
 
+<!-- ================= EXP 3 ================= -->
+<section id="exp3">
+  <div class="wrap">
+    <div class="exp-head">
+      <div>
+        <div class="tag reveal">06 · Improvement</div>
+        <h2 class="reveal">第三次检验：<span class="grad">针对问题做改进</span></h2>
+        <p class="lead reveal">前两次检验暴露了两个问题：三个大模型的错误高度相关，所以“一致”不够可信；交叉复核改对 13 条、改错 10 条，几乎没有净收益。针对这两点做了三项改进，在同样的 3 × 150 条经济金融金标准上重新检验。</p>
+      </div>
+      <div class="exp-no reveal">#3</div>
+    </div>
+    <div class="grid g3" style="margin-top:30px">
+      <div class="card reveal"><span class="chip c">改进 1</span><h3 style="margin-top:12px">动态示例</h3><p>每条文本从训练集中检索最相似的 6 条已标注样本放进提示词，让模型学到这个数据集自己的标注尺度。本地字符级 TF-IDF 检索，不额外花钱；训练集已剔除测试集文本。</p></div>
+      <div class="card reveal"><span class="chip v">改进 2</span><h3 style="margin-top:12px">本地小模型当第 4 票</h3><p>用训练集训练 TF-IDF + 逻辑回归分类器。它单独只有 58%–73%，但出错方式和大模型不同，能让“全票一致”变得更可信。本机运行，几秒训练完。</p></div>
+      <div class="card reveal"><span class="chip p">改进 3</span><h3 style="margin-top:12px">分歧直接转人工</h3><p>去掉效果不明显的交叉复核轮，首轮只要不一致就交给人工审核页，现为默认策略。</p></div>
+    </div>
+    <div class="kpis reveal">
+      <div class="kpi"><div class="v" style="color:var(--blue)">74.2%</div><div class="k">全自动准确率（基线 71.3%）</div></div>
+      <div class="kpi"><div class="v" style="color:var(--cyan)">85.4%</div><div class="k">自动放行部分的准确率（基线 78.8%）</div></div>
+      <div class="kpi"><div class="v" style="color:var(--green)">92.0%</div><div class="k">人工兜底后整体准确率（基线 83.6%）</div></div>
+      <div class="kpi"><div class="v" style="color:var(--pink)">43%</div><div class="k">需要人工的比例（基线 22%）</div></div>
+    </div>
+    <div class="grid g2" style="margin-top:18px">
+      <div class="card reveal chart">
+        <h3>人工兜底后的整体准确率</h3>
+        <p>基线：三个大模型一致才放行。改进后：动态示例 + 四票（含本地小模型）全一致才放行。其余都交人工，假设人工判对。</p>
+        <div class="hbar"><div class="t"><span>年报气候 · 基线</span><b style="color:var(--muted)">93.3%</b></div><div class="tr"><div class="fl" style="--w:93.3%;background:rgba(255,255,255,.25)"></div></div></div>
+        <div class="hbar"><div class="t"><span>年报气候 · 改进后</span><b style="color:var(--green)">97.3%</b></div><div class="tr"><div class="fl" style="--w:97.3%;background:linear-gradient(90deg,var(--cyan),var(--green))"></div></div></div>
+        <div class="hbar"><div class="t"><span>美联储 FOMC · 基线</span><b style="color:var(--muted)">76.7%</b></div><div class="tr"><div class="fl" style="--w:76.7%;background:rgba(255,255,255,.25)"></div></div></div>
+        <div class="hbar"><div class="t"><span>美联储 FOMC · 改进后</span><b style="color:var(--green)">86.0%</b></div><div class="tr"><div class="fl" style="--w:86%;background:linear-gradient(90deg,var(--cyan),var(--green))"></div></div></div>
+        <div class="hbar"><div class="t"><span>股吧情绪 · 基线</span><b style="color:var(--muted)">80.7%</b></div><div class="tr"><div class="fl" style="--w:80.7%;background:rgba(255,255,255,.25)"></div></div></div>
+        <div class="hbar"><div class="t"><span>股吧情绪 · 改进后</span><b style="color:var(--green)">92.7%</b></div><div class="tr"><div class="fl" style="--w:92.7%;background:linear-gradient(90deg,var(--cyan),var(--green))"></div></div></div>
+      </div>
+      <div class="card reveal">
+        <h3>逐项拆解</h3>
+        <table class="mtable">
+          <tr><th>数据集</th><th>全自动：基线 → 示例 → +小模型</th><th>基线放行 / 准确率</th><th>改进后放行 / 准确率</th></tr>
+          <tr><td>年报气候</td><td class="mono">83.3 → 85.3 → 86.0</td><td class="mono">78.7 / 91.5</td><td class="mono">62.7 / 95.7</td></tr>
+          <tr><td>美联储 FOMC</td><td class="mono">62.0 → 65.3 → 66.0</td><td class="mono">76.7 / 69.6</td><td class="mono">54.7 / 74.4</td></tr>
+          <tr><td>股吧情绪</td><td class="mono">68.7 → 72.0 → 70.7</td><td class="mono">78.0 / 75.2</td><td class="mono">53.3 / 86.2</td></tr>
+        </table>
+        <div class="feat" style="margin-top:18px"><span class="n">01</span><div><b>动态示例：稳定、几乎零成本</b><span>9 个“模型 × 数据集”组合中 8 个提升，平均 +2.9 个百分点。单个数据集 150 条的误差范围约 ±7.7 个百分点，单看一个不显著，但三个方向一致。</span></div></div>
+        <div class="feat"><span class="n">02</span><div><b>小模型：用人工换准确率</b><span>全自动准确率基本不变，但让“一致”可信得多。代价是人工比例从 22% 升到 43%；“四票至少三票”是折中方案（放行约 90%，准确率约 79%）。</span></div></div>
+        <div class="feat"><span class="n">03</span><div><b>FOMC 的上限在标注尺度</b><span>四票全一致仍判错的 21 条中，16 条是金标准为鹰派或鸽派、所有模型都判中性，例如“匈牙利和波兰采用了通胀目标制”被标为鹰派。</span></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ================= INSIGHT ================= -->
 <section id="insight">
   <div class="wrap">
-    <div class="tag reveal">06 · Insights</div>
-    <h2 class="reveal">两次检验，<span class="grad">四条核心结论</span></h2>
+    <div class="tag reveal">07 · Insights</div>
+    <h2 class="reveal">三次检验，<span class="grad">四条核心结论</span></h2>
     <div class="grid g2" style="margin-top:36px">
       <div class="card ins reveal"><span class="no">01</span><span class="chip a">投票 ≠ 更准</span>
         <div class="big" style="color:var(--amber)">κ 0.76–0.85</div>
@@ -561,6 +610,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
         <div class="op">=</div>
         <div class="box" style="border-color:rgba(52,211,153,.4);box-shadow:0 0 30px -10px rgba(52,211,153,.5)"><b style="color:var(--green)">80.7%</b><span>整体准确率，其余 78% 自动放行</span></div>
       </div>
+      <p class="muted" style="margin-top:14px;font-size:13.5px">第三次检验在三个经济金融数据集上加入动态示例和本地小模型，把放行门槛提高到“四票全一致”：人工比例升到 43%，整体准确率从 83.6% 提高到 92.0%。</p>
     </div>
   </div>
 </section>
@@ -568,7 +618,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
 <!-- ================= PLATFORM ================= -->
 <section id="platform">
   <div class="wrap">
-    <div class="tag reveal">07 · Platform</div>
+    <div class="tag reveal">08 · Platform</div>
     <h2 class="reveal">不写命令也能用的<span class="grad">本地网页平台</span></h2>
     <p class="lead reveal">基于 Streamlit，<span class="mono">streamlit run app.py</span> 即可打开。API key 只保存在本地 <span class="mono">.env</span>，页面上只显示后 4 位。</p>
     <div class="grid g4" style="margin-top:36px">
@@ -616,7 +666,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
 <!-- ================= ROADMAP ================= -->
 <section id="roadmap">
   <div class="wrap">
-    <div class="tag reveal">08 · Roadmap</div>
+    <div class="tag reveal">09 · Roadmap</div>
     <h2 class="reveal">从实验工具到<span class="grad">生产系统</span></h2>
     <div class="road">
       <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.1</b><h3>基础实现</h3><span class="chip g">已完成</span></div>
@@ -630,9 +680,9 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.5</b><h3>高级协作模式</h3></div>
         <ul><li>多轮辩论</li><li>魔鬼代言人对抗从众</li><li>证据引用</li><li>评审团模式（PoLL）</li><li>多标签 / 层级分类</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.6</b><h3>闭环自进化</h3></div>
-        <ul><li>动态 Few-shot（RAG）</li><li>分歧模式分析改规则</li><li>DSPy 提示词优化</li><li>主动学习</li><li>cleanlab 标签噪声检测</li></ul></div></div>
+        <ul><li class="y">动态 Few-shot（TF-IDF 检索）</li><li>向量检索 · 人工结果入库</li><li>分歧模式分析改规则</li><li>DSPy 提示词优化</li><li>主动学习</li><li>cleanlab 标签噪声检测</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.7</b><h3>蒸馏与工程化</h3></div>
-        <ul><li>小模型蒸馏</li><li>FastAPI 服务</li><li>质量漂移监控</li><li>本地模型 Ollama / vLLM</li></ul></div></div>
+        <ul><li class="y">本地小模型投票</li><li>小模型蒸馏</li><li>FastAPI 服务</li><li>质量漂移监控</li><li>本地模型 Ollama / vLLM</li></ul></div></div>
     </div>
   </div>
 </section>

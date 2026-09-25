@@ -29,6 +29,25 @@ def render_guide(task: TaskConfig) -> str:
     return "\n\n".join(parts)
 
 
+Examples = list[tuple[str, str]]
+
+
+def _examples_block(examples: Examples | None, max_chars: int = 300) -> str | None:
+    if not examples:
+        return None
+
+    def clip(t: str) -> str:
+        t = " ".join(t.split())
+        return t if len(t) <= max_chars else t[:max_chars] + "…"
+
+    lines = [f"{i}. 【{label}】{clip(t)}" for i, (t, label) in enumerate(examples, 1)]
+    return (
+        "# 相似的已标注样本（来自同一数据集的训练集，反映该数据集的标注习惯）\n"
+        "这些样本与待分类文本最相似，其标签由人工标注。请参考它们理解标注尺度，"
+        "但仍需根据待分类文本本身的内容判断，不要机械照搬。\n" + "\n".join(lines)
+    )
+
+
 def _text_block(text: str) -> str:
     return f"# 待分类文本\n<text>\n{text}\n</text>"
 
@@ -49,12 +68,24 @@ def _opinions_block(title: str, opinions: list[Prediction]) -> str:
     return f"# {title}\n<peer_opinions>\n" + "\n".join(lines) + "\n</peer_opinions>"
 
 
-def build_classify_prompt(task: TaskConfig, text: str) -> str:
-    return "\n\n".join([render_guide(task), _text_block(text), _output_spec(task)])
+def _head(task: TaskConfig, text: str, examples: Examples | None, max_chars: int) -> list[str]:
+    parts = [render_guide(task)]
+    block = _examples_block(examples, max_chars)
+    if block:
+        parts.append(block)
+    parts.append(_text_block(text))
+    return parts
 
 
-def build_review_prompt(task: TaskConfig, text: str, own: Prediction | None, peers: list[Prediction]) -> str:
-    parts = [render_guide(task), _text_block(text)]
+def build_classify_prompt(task: TaskConfig, text: str, examples: Examples | None = None, max_chars: int = 300) -> str:
+    return "\n\n".join([*_head(task, text, examples, max_chars), _output_spec(task)])
+
+
+def build_review_prompt(
+    task: TaskConfig, text: str, own: Prediction | None, peers: list[Prediction],
+    examples: Examples | None = None, max_chars: int = 300,
+) -> str:
+    parts = _head(task, text, examples, max_chars)
     if own is not None and own.ok:
         parts.append(f"# 你之前的判断\n标签={own.label}，置信度={own.confidence:.2f}，理由：{own.reason}")
     parts.append(_opinions_block("其他评审员的意见（匿名）", peers))
@@ -68,10 +99,12 @@ def build_review_prompt(task: TaskConfig, text: str, own: Prediction | None, pee
     return "\n\n".join(parts)
 
 
-def build_arbiter_prompt(task: TaskConfig, text: str, opinions: list[Prediction]) -> str:
+def build_arbiter_prompt(
+    task: TaskConfig, text: str, opinions: list[Prediction],
+    examples: Examples | None = None, max_chars: int = 300,
+) -> str:
     return "\n\n".join([
-        render_guide(task),
-        _text_block(text),
+        *_head(task, text, examples, max_chars),
         _opinions_block("各评审员的意见（匿名，存在分歧）", opinions),
         "# 要求\n你是最终仲裁者。请严格依据分类标准和边界规则给出最终判断。"
         "评审员的意见仅供参考，多数意见不一定正确。如果文本本身确实模糊、难以判断，请给出较低的置信度。",

@@ -12,6 +12,7 @@ from .aggregate import weighted_vote
 from .classifier import Classifier, LLMCache, Prediction
 from .config import Config
 from .llm import create_llm
+from .local_model import get_bank
 
 STATUS_CONSENSUS = "consensus"
 STATUS_MAJORITY = "majority"
@@ -62,6 +63,7 @@ class CrossCheckPipeline:
             self.weights.update({k: v for k, v in weights.items() if k in self.weights})
         self.classifiers: list[Classifier] = []
         self.arbiter: Classifier | None = None
+        self.bank = None
 
     async def __aenter__(self) -> CrossCheckPipeline:
         pc = self.config.pipeline
@@ -71,14 +73,17 @@ class CrossCheckPipeline:
         )
         self.cache = LLMCache(self.config.cache.path, self.config.cache.enabled)
         try:
+            fs = self.config.fewshot
+            if fs.enabled:
+                self.bank = get_bank(fs.path, tuple(self.config.task.label_names), fs.text_col, fs.label_col)
             sem = asyncio.Semaphore(pc.concurrency)
             self.classifiers = [
-                Classifier(self.config.task, create_llm(m, self._http, self.config), self.cache, sem)
+                Classifier(self.config.task, create_llm(m, self._http, self.config), self.cache, sem, fs.max_chars)
                 for m in self.config.models
             ]
             if self.config.arbiter and pc.use_arbiter:
                 llm = create_llm(self.config.arbiter, self._http, self.config)
-                self.arbiter = Classifier(self.config.task, llm, self.cache, sem)
+                self.arbiter = Classifier(self.config.task, llm, self.cache, sem, fs.max_chars)
         except Exception:
             await self.__aexit__()
             raise
@@ -90,8 +95,9 @@ class CrossCheckPipeline:
 
     async def process(self, item_id: str, text: str) -> ItemResult:
         pc = self.config.pipeline
+        ex = self.bank.nearest(text, self.config.fewshot.k) if self.bank is not None else None
 
-        r1 = list(await asyncio.gather(*(c.classify(text) for c in self.classifiers)))
+        r1 = list(await asyncio.gather(*(c.classify(text, ex) for c in self.classifiers)))
         valid1 = [p for p in r1 if p.ok]
         if len(valid1) >= pc.min_votes and len({p.label for p in valid1}) == 1:
             conf = sum(p.confidence for p in valid1) / len(valid1)
@@ -103,7 +109,7 @@ class CrossCheckPipeline:
         final = r1
         if action == "review" and pc.cross_review and valid1:
             r2 = list(await asyncio.gather(*(
-                c.review(text, r1[i], [p for j, p in enumerate(r1) if j != i and p.ok])
+                c.review(text, r1[i], [p for j, p in enumerate(r1) if j != i and p.ok], ex)
                 for i, c in enumerate(self.classifiers)
             )))
             final = [b if b.ok else a for a, b in zip(r1, r2)]
@@ -115,7 +121,7 @@ class CrossCheckPipeline:
 
         arb = None
         if action != "human" and self.arbiter is not None and vote.total > 0:
-            arb = await self.arbiter.arbitrate(text, [p for p in final if p.ok])
+            arb = await self.arbiter.arbitrate(text, [p for p in final if p.ok], ex)
             if arb.ok and arb.confidence >= pc.arbiter_threshold:
                 return ItemResult(item_id, text, arb.label, STATUS_ARBITRATED, round(arb.confidence, 3), r1, r2, arb)
 

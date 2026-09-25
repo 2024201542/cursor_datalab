@@ -94,10 +94,13 @@ def main() -> None:
         gold["id"] = [f"{name}{i}" for i in gold["index"]]
         path = OUT / f"econ_{name}_gold.csv"
         gold[["id", "text", "label"]].to_csv(path, index=False, encoding="utf-8-sig")
-        print(f"{path.name}: {len(gold)} 条（每类 {n}），测试集共 {len(test)} 条，训练集 {len(train)} 条")
+        # 训练集去掉与测试集重复的文本，供动态示例检索和本地模型训练使用
+        pool = train[~train["text"].isin(test_texts)]
+        pool[["text", "label"]].to_csv(OUT / f"econ_{name}_train.csv", index=False, encoding="utf-8-sig")
+        print(f"{path.name}: {len(gold)} 条（每类 {n}），测试集共 {len(test)} 条；训练集 {len(pool)} 条 → econ_{name}_train.csv")
 
-        # 提示词示例只取训练集中的短样本，且不能出现在测试集里
-        short = train[(train["text"].str.len().between(15, 220)) & (~train["text"].isin(test_texts))]
+        # 静态提示词示例只取训练集中的短样本
+        short = pool[pool["text"].str.len().between(15, 220)]
         examples[name] = {
             lab: g.sample(n=min(2, len(g)), random_state=args.seed)["text"].tolist()
             for lab, g in short.groupby("label")

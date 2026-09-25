@@ -149,8 +149,9 @@ class RateLimiter:
 
 
 class Classifier:
-    def __init__(self, task: TaskConfig, llm: BaseLLM, cache: LLMCache, semaphore: asyncio.Semaphore):
+    def __init__(self, task: TaskConfig, llm: BaseLLM, cache: LLMCache, semaphore: asyncio.Semaphore, max_chars: int = 300):
         self.task = task
+        self.max_chars = max_chars
         self.llm = llm
         self.cache = cache
         self.sem = semaphore
@@ -161,14 +162,14 @@ class Classifier:
     def name(self) -> str:
         return self.llm.cfg.name
 
-    async def classify(self, text: str) -> Prediction:
-        return await self._call(build_classify_prompt(self.task, text))
+    async def classify(self, text: str, examples=None) -> Prediction:
+        return await self._call(build_classify_prompt(self.task, text, examples, self.max_chars))
 
-    async def review(self, text: str, own: Prediction | None, peers: list[Prediction]) -> Prediction:
-        return await self._call(build_review_prompt(self.task, text, own, peers))
+    async def review(self, text: str, own: Prediction | None, peers: list[Prediction], examples=None) -> Prediction:
+        return await self._call(build_review_prompt(self.task, text, own, peers, examples, self.max_chars))
 
-    async def arbitrate(self, text: str, opinions: list[Prediction]) -> Prediction:
-        return await self._call(build_arbiter_prompt(self.task, text, opinions))
+    async def arbitrate(self, text: str, opinions: list[Prediction], examples=None) -> Prediction:
+        return await self._call(build_arbiter_prompt(self.task, text, opinions, examples, self.max_chars))
 
     async def _call(self, user: str) -> Prediction:
         key = LLMCache.make_key(self.llm.cfg, SYSTEM_PROMPT, user)

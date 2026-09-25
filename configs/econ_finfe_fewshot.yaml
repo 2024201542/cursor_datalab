@@ -1,0 +1,20 @@
+# 股吧情绪：动态示例版
+# 每条待分类文本都从训练集检索最相似的 6 条已标注样本放进提示词，让模型学习该数据集的标注尺度
+base: econ_finfe.yaml
+
+fewshot:
+  path: data/econ_finfe_train.csv   # 由 scripts/prepare_econ.py 生成，已剔除与测试集重复的文本
+  k: 6
+  max_chars: 300
+
+# 首轮分歧直接转人工：实测交叉复核改对与改错的样本数量相当，不再复核
+pipeline:
+  concurrency: 8
+  min_votes: 2
+  disagreement_action: human
+  cross_review: false
+  accept_threshold: 0.6
+  use_arbiter: false
+  arbiter_threshold: 0.7
+  timeout: 60
+  max_retries: 3

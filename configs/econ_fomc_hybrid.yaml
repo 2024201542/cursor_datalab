@@ -1,0 +1,30 @@
+# FOMC 鹰鸽：动态示例 + 本地小模型混合投票版
+# 在三个大模型之外，加入一个用训练集训练的 TF-IDF + 逻辑回归分类器作为第 4 票。
+# 它的出错方式与大模型不同，能提高投票的独立性；本机运行，不调用 API。
+base: econ_fomc_fewshot.yaml
+
+models:
+  - name: deepseek
+    provider: openai
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-flash
+    extra_body:
+      thinking: {type: disabled}
+
+  - name: kimi
+    provider: openai
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    model: kimi-k2.6
+
+  - name: qwen
+    provider: openai
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    model: qwen3.7-plus
+    extra_body:
+      enable_thinking: false
+
+  - name: local
+    provider: local               # 训练集默认取 fewshot.path
