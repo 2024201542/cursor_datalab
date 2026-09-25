@@ -182,6 +182,27 @@ def save_config(raw: dict, path: str | Path) -> None:
     Path(path).write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
+def base_of(path: str | Path) -> Path | None:
+    """配置文件 base 字段指向的文件（绝对路径）；没有 base 返回 None。"""
+    p = Path(path)
+    if not p.exists():
+        return None
+    base = (yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("base")
+    return (p.parent / base).resolve() if base else None
+
+
+def save_config_diff(raw: dict, path: str | Path, base: str | Path | None) -> None:
+    """有 base 时只写入与 base 不同的顶层字段，这样模型配置等公共部分仍随 base 更新。"""
+    path = Path(path)
+    if base is None or Path(base).resolve() == path.resolve():
+        save_config(raw, path)
+        return
+    base = Path(base).resolve()
+    base_raw = read_raw_config(base)
+    rel = Path(os.path.relpath(base, path.resolve().parent)).as_posix()
+    save_config({"base": rel, **{k: v for k, v in raw.items() if base_raw.get(k) != v}}, path)
+
+
 def load_config(path: str | Path, mock: bool = False) -> Config:
     return config_from_dict(read_raw_config(path), mock=mock)
 

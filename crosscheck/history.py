@@ -8,6 +8,7 @@ import shutil
 import time
 from pathlib import Path
 
+from .criteria import criteria_hash, version_label
 from .pipeline import STATUS_HUMAN
 
 LOCAL_PROVIDERS = ("local", "mock")
@@ -31,11 +32,15 @@ def _snapshot(raw: dict | None) -> dict | None:
 def write_meta(run_path: str | Path, *, source: str, input_name: str, config, raw: dict | None,
                stats: dict, elapsed: float, n: int, has_gold: bool, config_path: str = "", note: str = "") -> dict:
     pc, fs = config.pipeline, config.fewshot
+    h = criteria_hash((raw or {}).get("task")) if raw else ""
     meta = {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": source,
         "input": input_name,
         "config_path": config_path,
+        "task_name": config.task.name,
+        "criteria_hash": h,
+        "criteria_version": version_label(config_path, h) if h and config_path else h,
         "n": n,
         "has_gold": has_gold,
         "elapsed": round(elapsed, 1),
@@ -65,10 +70,20 @@ def load_meta(run_path: str | Path) -> dict:
     p = meta_path(run_path)
     if p.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            meta = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            pass
+            return {}
+        if not meta.get("criteria_hash") and (meta.get("config") or {}).get("task"):
+            meta["criteria_hash"] = criteria_hash(meta["config"]["task"])
+        h, cp = meta.get("criteria_hash"), meta.get("config_path")
+        if h and cp:
+            meta["criteria_version"] = version_label(cp, h)  # 运行后才保存的版本也能对上号
+        return meta
     return {}
+
+
+def run_criteria(meta: dict) -> dict | None:
+    return (meta.get("config") or {}).get("task")
 
 
 def set_note(run_path: str | Path, note: str) -> None:

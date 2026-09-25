@@ -306,7 +306,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
 <div class="bg-glow g1"></div><div class="bg-glow g2"></div><div class="bg-glow g3"></div>
 
 <nav>
-  <a class="logo" href="#top"><span class="logo-mark"></span>CrossCheck <small>v0.3</small></a>
+  <a class="logo" href="#top"><span class="logo-mark"></span>CrossCheck <small>v0.3.1</small></a>
   <div class="nav-links">
     <a href="#problem">思路</a><a href="#pipeline">流程</a><a href="#arch">架构</a>
     <a href="#exp1">第一次检验</a><a href="#exp2">第二次检验</a><a href="#exp3">改进</a><a href="#insight">发现</a><a href="#platform">平台</a><a href="#roadmap">路线图</a>
@@ -412,7 +412,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
     <div class="arch">
       <div class="layers reveal">
         <div class="layer"><div class="ln">交互层</div><div class="mods"><span class="mod">app.py<em>Streamlit 四页平台</em></span><span class="mod">cli.py<em>classify / evaluate / aggregate / ping</em></span></div></div>
-        <div class="layer"><div class="ln">决策层</div><div class="mods"><span class="mod">pipeline.py<em>六道关卡流水线</em></span><span class="mod">prompts.py<em>首轮 / 复核 / 仲裁</em></span><span class="mod">review.py<em>人工审核与回流</em></span><span class="mod">history.py<em>运行记录 · 多次对比</em></span></div></div>
+        <div class="layer"><div class="ln">决策层</div><div class="mods"><span class="mod">pipeline.py<em>六道关卡流水线</em></span><span class="mod">prompts.py<em>首轮 / 复核 / 仲裁</em></span><span class="mod">review.py<em>人工审核与回流</em></span><span class="mod">history.py<em>运行记录 · 多次对比</em></span><span class="mod">criteria.py<em>标准版本 · 差异</em></span><span class="mod">drafting.py<em>标准草稿 · 体检</em></span></div></div>
         <div class="layer"><div class="ln">聚合评估层</div><div class="mods"><span class="mod">aggregate.py<em>加权投票 · Dawid-Skene</em></span><span class="mod">evaluate.py<em>Kappa · 混淆矩阵 · 权重</em></span><span class="mod">report.py<em>图表 · HTML 报告</em></span></div></div>
         <div class="layer"><div class="ln">调用层</div><div class="mods"><span class="mod">llm.py<em>OpenAI 兼容 · Anthropic · 本地 · mock</em></span><span class="mod">local_model.py<em>相似样本检索 · 本地小模型</em></span><span class="mod">classifier.py<em>解析容错 · 缓存 · 限流</em></span></div></div>
         <div class="layer"><div class="ln">配置层</div><div class="mods"><span class="mod">config.yaml</span><span class="mod">configs/*.yaml<em>base 继承</em></span><span class="mod">.env<em>API key 仅本地</em></span></div></div>
@@ -643,7 +643,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
             <div class="fake-row"><div class="fake v" style="width:18%"></div><div class="fake" style="width:70%"></div></div>
             <div class="fake-row"><div class="fake a" style="width:96%;background:rgba(251,191,36,.25)"></div></div>
           </div></div>
-        <h3 style="margin-top:16px;font-size:16px">分类任务</h3><p class="muted" style="font-size:13.5px">编辑类别定义、正反例和边界规则，实时预览最终发给模型的提示词。</p>
+        <h3 style="margin-top:16px;font-size:16px">分类任务</h3><p class="muted" style="font-size:13.5px">编辑类别定义、正反例和边界规则，实时预览提示词；从标准文档或已标注数据生成标准草稿，标准体检，版本记录与恢复，新任务验证向导。</p>
       </div>
       <div class="reveal">
         <div class="win"><div class="win-bar"><i></i><i></i><i></i>③ 运行与结果</div>
@@ -678,6 +678,8 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
         <ul><li class="y">页面配置模型与任务</li><li class="y">上传文件 · 图表结果</li><li class="y">分歧处理策略开关</li><li class="y">人工审核页</li><li class="y">历史运行记录 · 载入配置复现</li><li class="y">多次运行对比 · 显著性检验</li></ul></div></div>
       <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.3</b><h3>成本与稳定性</h3><span class="chip g">已完成</span></div>
         <ul><li class="y">级联调用：本地 + DeepSeek 一致即采纳，费用降到 40%</li><li class="y">断点续跑</li><li class="y">Token 与费用统计</li><li class="y">运行前费用预估 · 预算上限</li><li class="y">置信度级联：费用 ↔ 准确率可调</li><li class="y">选项顺序随机化（实测无位置偏好）</li></ul></div></div>
+      <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.3.1</b><h3>任务库与分类标准管理</h3><span class="chip g">已完成</span></div>
+        <ul><li class="y">任务库：新建 / 复制任务，模型配置自动继承</li><li class="y">上传标准文档生成标准草稿</li><li class="y">从已标注数据归纳标准（实测与手写相当）</li><li class="y">标准体检</li><li class="y">标准版本 · 差异 · 恢复</li><li class="y">验证向导：抽样 · 调参集 / 验证集</li></ul></div></div>
       <div class="ms doing reveal"><div class="card"><div class="hd"><b>v0.4</b><h3>更强的聚合与校准</h3></div>
         <ul><li>按类别的权重</li><li>置信度校准</li><li>Self-Consistency</li><li class="y">Logprobs 置信度</li><li>动态阈值搜索</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.5</b><h3>高级协作模式</h3></div>
@@ -686,7 +688,9 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
         <ul><li class="y">动态 Few-shot（TF-IDF 检索）</li><li>向量检索 · 人工结果入库</li><li>分歧模式分析改规则</li><li>DSPy 提示词优化</li><li>主动学习</li><li>cleanlab 标签噪声检测</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.7</b><h3>蒸馏与工程化</h3></div>
         <ul><li class="y">本地小模型投票</li><li>小模型蒸馏</li><li>FastAPI 服务</li><li>质量漂移监控</li><li>本地模型 Ollama / vLLM</li></ul></div></div>
-      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.8</b><h3>上传年报自动分类</h3></div>
+      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.8</b><h3>对话分类</h3></div>
+        <ul><li>逐句 / 整段对话导入</li><li>角色感知的提示词</li><li>整段或逐句两种粒度</li><li>长对话截取与费用预估</li><li>聊天气泡式审核页</li></ul></div></div>
+      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.9</b><h3>上传年报自动分类</h3></div>
         <ul><li>PDF / Word 年报解析</li><li>章节识别与段落切分</li><li>逐段互检分类 · 多标签</li><li>费用预估与段落预筛</li><li>公司 × 年度指标面板</li><li>原文对照审核页</li></ul></div></div>
     </div>
   </div>

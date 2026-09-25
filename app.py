@@ -17,24 +17,30 @@ from pathlib import Path
 import httpx
 import pandas as pd
 import streamlit as st
+import yaml
 
 from crosscheck.config import (
     DISAGREEMENT_ACTIONS,
     PROVIDERS,
     ModelConfig,
+    base_of,
     config_from_dict,
     load_dotenv,
     read_raw_config,
-    save_config,
+    save_config_diff,
     save_dotenv,
 )
+from crosscheck.criteria import changed_labels, criteria_hash, diff_criteria, list_versions, save_version, version_label
+from crosscheck.drafting import draft_from_document, draft_from_examples, drafting_models, read_document, review_criteria
 from crosscheck.evaluate import evaluate
+from crosscheck.validation import ci_halfwidth, sample_rows, split_dev_test
 from crosscheck.history import (
     compare_items,
     delete_run,
     item_correct,
     load_meta,
     mcnemar,
+    run_criteria,
     set_note,
     settings_text,
     summarize,
@@ -153,6 +159,18 @@ def df_to_labels(df: pd.DataFrame) -> list[dict]:
     return out
 
 
+def apply_task(raw: dict, fields_: dict) -> None:
+    """用新的分类标准（草稿或历史版本）替换页面上的标准，并刷新相关表格。"""
+    raw["task"] = {**raw.get("task", {}), **{k: copy.deepcopy(v) for k, v in fields_.items()
+                                             if k in ("name", "description", "labels", "rules")}}
+    names = {lab["name"] for lab in raw["task"]["labels"]}
+    kw = (raw.get("mock") or {}).get("keywords") or {}
+    raw["mock"] = {**(raw.get("mock") or {}), "keywords": {k: v for k, v in kw.items() if k in names}}
+    st.session_state.labels_df = labels_to_df(raw)
+    st.session_state.models_df = models_to_df(raw)
+    st.session_state.ver = st.session_state.get("ver", 0) + 1
+
+
 def load_into_state(path: str) -> None:
     raw = read_raw_config(path)
     st.session_state.raw = raw
@@ -163,6 +181,18 @@ def load_into_state(path: str) -> None:
 
 def config_files() -> list[str]:
     return ["config.yaml"] + sorted(p.as_posix() for p in Path("configs").glob("*.yaml"))
+
+
+@st.cache_data(show_spinner=False)
+def _task_title(path: str, stamp: int) -> str:
+    try:
+        return (read_raw_config(path).get("task") or {}).get("name") or Path(path).stem
+    except (OSError, ValueError, yaml.YAMLError):
+        return Path(path).stem
+
+
+def task_title(path: str) -> str:
+    return _task_title(path, Path(path).stat().st_mtime_ns if Path(path).exists() else 0)
 
 
 # ---------------------------------------------------------------- 运行
@@ -256,16 +286,43 @@ with st.sidebar:
     st.title("🔍 多模型互检分类")
     files = config_files()
     current = st.session_state.get("cfg_path", "config.yaml")
-    picked = st.selectbox("配置文件", files, index=files.index(current) if current in files else 0)
+    picked = st.selectbox("分类任务（配置文件）", files, index=files.index(current) if current in files else 0,
+                          format_func=lambda f: f"{task_title(f)}　·　{f}")
     if picked != current:
         st.session_state.cfg_path = picked
         load_into_state(picked)
         st.rerun()
-    st.caption("在页面上修改后立即生效；需要长期保留时点击保存。")
+    version_slot = st.empty()
     default_save = "configs/web.yaml" if picked == "config.yaml" else picked
     save_path = st.text_input("保存为", value=default_save)
-    save_clicked = st.button("💾 保存配置", width="stretch")
-    st.caption("保存会按页面内容重写该文件，原文件中的注释不会保留。")
+    save_note = st.text_input("本次修改说明（可选）", placeholder="例如：拆分“投诉”为两类 / 补充反讽规则",
+                              help="分类标准（类别、定义、正反例、规则）有变化时会自动保存为新版本，运行记录里会标明用的是哪个版本")
+    save_clicked = st.button("💾 保存", width="stretch")
+    st.caption("有 base 的任务文件只保存与 base 不同的部分（模型配置随 config.yaml 更新）；原文件中的注释不会保留。")
+
+    with st.expander("➕ 新建分类任务"):
+        new_title = st.text_input("任务名称", placeholder="例如：客服对话质检")
+        new_file = st.text_input("文件名（字母、数字、下划线）", placeholder="例如：dialog_qc")
+        new_from = st.radio("从哪里开始", ["空白任务（只沿用模型配置）", "复制当前任务的标准和设置"])
+        if st.button("创建", width="stretch", disabled=not (new_title.strip() and new_file.strip())):
+            slug = re.sub(r"[^0-9A-Za-z_\-]", "_", new_file.strip())
+            target = Path("configs") / f"{slug}.yaml"
+            if target.exists():
+                st.error(f"{target.as_posix()} 已存在，换一个文件名")
+            else:
+                if new_from.startswith("空白"):
+                    new_raw = {**read_raw_config("config.yaml"), "mock": {"keywords": {}}, "fewshot": {},
+                               "task": {"name": new_title.strip(), "description": "", "rules": [],
+                                        "labels": [{"name": "类别A", "definition": ""}, {"name": "类别B", "definition": ""}]}}
+                else:
+                    new_raw = copy.deepcopy(st.session_state.raw)
+                    new_raw["task"] = {**new_raw.get("task", {}), "name": new_title.strip()}
+                save_config_diff(new_raw, target, Path("config.yaml"))
+                save_version(target, new_raw["task"], "创建任务")
+                st.session_state.cfg_path = target.as_posix()
+                load_into_state(target.as_posix())
+                st.rerun()
+        st.caption("新任务保存在 configs/ 下，模型配置继承 config.yaml。接着到“② 分类任务”页写标准，或用文档自动生成草稿。")
 
 raw = st.session_state.raw
 ver = st.session_state.ver
@@ -332,6 +389,86 @@ with tab_models:
 # ---------------- ② 分类任务
 with tab_task:
     task = raw.setdefault("task", {})
+    try:
+        draft_cfg = config_from_dict(raw)
+        draft_models = drafting_models(draft_cfg)
+    except ValueError:
+        draft_cfg, draft_models = None, []
+
+    with st.expander("🪄 用标准文档或已标注数据生成标准草稿", expanded=not (task.get("labels") and any(
+            lab.get("definition") for lab in task.get("labels") or []))):
+        st.caption("由大模型把你的分类标准整理成下面的“类别定义 + 正反例 + 边界规则”，生成后先预览，确认后再替换，之后仍可手动修改。")
+        if not draft_models:
+            st.warning("需要至少一个可用的大模型（在“① 模型配置”页配置并填好 Key）。")
+        else:
+            c1, c2 = st.columns([2, 1])
+            src = c1.radio("草稿来源", ["上传标准文档", "粘贴标准文字", "从已标注数据归纳"], horizontal=True,
+                           help="文档 / 文字：适合已有书面分类口径；已标注数据：适合只有标好的样本、没有成文标准的情况")
+            names = [m.name for m in draft_models]
+            draft_model = c2.selectbox("用哪个模型起草", names,
+                                       index=next((i for i, n in enumerate(names) if "qwen" in n.lower()), 0))
+            model_cfg = next(m for m in draft_models if m.name == draft_model)
+            doc_text, pairs, truncated = "", [], False
+            if src == "上传标准文档":
+                f = st.file_uploader("标准文档（Word / PDF / TXT / Markdown）", type=["docx", "pdf", "txt", "md"], key="std_doc")
+                if f is not None:
+                    try:
+                        doc_text, truncated = read_document(f.name, f.getvalue())
+                        st.caption(f"读取到 {len(doc_text)} 字" + ("（超过 4 万字，只使用前 4 万字）" if truncated else ""))
+                    except (ValueError, ImportError) as err:
+                        st.error(str(err))
+            elif src == "粘贴标准文字":
+                doc_text = st.text_area("把分类标准粘贴到这里", height=200, key="std_paste",
+                                        placeholder="例如：一、投诉：用户对商品或服务表达不满……\n二、咨询：……")
+            else:
+                files = sorted(p.as_posix() for p in Path("data").glob("**/*") if p.suffix.lower() in (".csv", ".xlsx", ".xls", ".jsonl"))
+                lf = st.selectbox("已标注的数据文件（data 目录）", files, key="std_labeled") if files else None
+                if lf:
+                    ldf = read_training(lf, Path(lf).stat().st_mtime_ns)
+                    lcols = list(ldf.columns)
+                    c1, c2, c3 = st.columns(3)
+                    tcol = c1.selectbox("文本列", lcols, index=lcols.index(guess_col(lcols, {"text", "文本", "内容"}, lcols[0])), key="std_tcol")
+                    lcol = c2.selectbox("标签列", lcols, index=lcols.index(guess_col(lcols, {"label", "标签", "类别"}, lcols[-1])), key="std_lcol")
+                    per_label = c3.slider("每类抽多少条给模型看", 10, 60, 25, 5, key="std_per")
+                    sub = ldf[[tcol, lcol]].dropna()
+                    pairs = list(zip(sub[tcol].astype(str), sub[lcol].astype(str)))
+                    counts = sub[lcol].astype(str).value_counts()
+                    st.caption(f"{len(pairs)} 条，{len(counts)} 个类别：" + "，".join(f"{k} {v}" for k, v in counts.items()))
+                    if len(counts) > 30:
+                        st.warning("类别超过 30 个，请确认选对了标签列。")
+            revise = st.checkbox("在当前标准基础上修订（保留现有类别名称）", value=False, disabled=src == "从已标注数据归纳",
+                                 help="不勾选：按文档重新整理一份完整标准")
+            ready = bool(doc_text.strip()) if src != "从已标注数据归纳" else len({lab for _, lab in pairs}) >= 2
+            if st.button("🪄 生成草稿", disabled=not ready, type="primary"):
+                try:
+                    with st.spinner(f"{draft_model} 正在整理标准，通常需要 20~90 秒…"):
+                        if src == "从已标注数据归纳":
+                            st.session_state.draft = draft_from_examples(draft_cfg, model_cfg, pairs, task.get("description", ""), per_label)
+                        else:
+                            st.session_state.draft = draft_from_document(draft_cfg, model_cfg, doc_text, task if revise else None)
+                except LLMError as err:
+                    st.error(str(err))
+        draft = st.session_state.get("draft")
+        if draft:
+            st.markdown(f"**草稿：{draft['name'] or '（未命名）'}**　{draft['description']}")
+            st.dataframe(labels_to_df({"task": draft}), hide_index=True, width="stretch")
+            if draft["rules"]:
+                st.markdown("**边界规则**\n" + "\n".join(f"{i}. {r}" for i, r in enumerate(draft["rules"], 1)))
+            for note in draft["notes"]:
+                st.warning(f"需要确认：{note}")
+            if task.get("labels"):
+                changes = diff_criteria(task, draft)
+                with st.expander(f"与当前标准相比的变化（{len(changes)} 处）"):
+                    st.markdown("\n".join(f"- {c}" for c in changes) or "没有变化")
+            c1, c2 = st.columns(2)
+            if c1.button("✅ 用草稿替换当前标准", width="stretch"):
+                apply_task(raw, {k: draft[k] for k in ("name", "description", "labels", "rules") if draft[k] or k != "name"})
+                st.session_state.draft = None
+                st.rerun()
+            if c2.button("丢弃草稿", width="stretch"):
+                st.session_state.draft = None
+                st.rerun()
+
     c1, c2 = st.columns([1, 2])
     task["name"] = c1.text_input("任务名称", value=task.get("name", ""), key=f"task_name_{ver}")
     task["description"] = c2.text_input("任务说明", value=task.get("description", ""), key=f"task_desc_{ver}")
@@ -342,12 +479,113 @@ with tab_task:
     st.subheader("边界规则")
     rules_text = st.text_area("每行一条：写清楚容易混淆的情况该怎么判", value="\n".join(task.get("rules") or []), height=140, key=f"rules_{ver}")
     task["rules"] = [r.strip() for r in rules_text.splitlines() if r.strip()]
+    names_now = {lab["name"] for lab in task["labels"]}
+    kw = (raw.get("mock") or {}).get("keywords") or {}
+    if set(kw) - names_now:  # 改名或删类别后，去掉 mock 模式里已经不存在的类别，避免配置报错
+        raw["mock"] = {**(raw.get("mock") or {}), "keywords": {k: v for k, v in kw.items() if k in names_now}}
     with st.expander("预览发给模型的提示词"):
         try:
             demo = config_from_dict(raw, mock=True).task
             st.code(build_classify_prompt(demo, "（这里是待分类文本）"), language="markdown")
         except ValueError as e:
             st.warning(str(e))
+
+    # -------- 标准体检
+    st.subheader("🩺 标准体检")
+    st.caption("让大模型从标注员的角度检查：类别是否重叠、定义是否含糊、常见情况是否没被覆盖、规则是否冲突。建议写完标准、正式运行前做一次。")
+    c1, c2 = st.columns([1, 3])
+    if c1.button("开始体检", disabled=not draft_models or len(task["labels"]) < 2, width="stretch"):
+        names = [m.name for m in draft_models]
+        m = draft_models[next((i for i, n in enumerate(names) if "qwen" in n.lower()), 0)]
+        try:
+            with st.spinner(f"{m.name} 正在审查标准…"):
+                st.session_state.checkup = {"hash": criteria_hash(task), **review_criteria(draft_cfg, m, task)}
+        except LLMError as err:
+            st.error(str(err))
+    chk = st.session_state.get("checkup")
+    if chk:
+        if chk["hash"] != criteria_hash(task):
+            c2.caption("标准在体检后又修改过，结果可能已过时。")
+        if chk["summary"]:
+            st.info(chk["summary"])
+        if chk["issues"]:
+            st.dataframe(pd.DataFrame([{"类型": i.get("type", ""), "涉及类别": "、".join(i.get("labels") or []),
+                                        "问题": i.get("problem", ""), "建议": i.get("suggestion", "")} for i in chk["issues"]]),
+                         hide_index=True, width="stretch",
+                         column_config={"问题": st.column_config.TextColumn(width="large"),
+                                        "建议": st.column_config.TextColumn(width="large")})
+        else:
+            st.success("没有发现明显问题。")
+
+    # -------- 标准版本
+    cfg_now = st.session_state.get("cfg_path", "config.yaml")
+    vers = list_versions(cfg_now)
+    with st.expander(f"🕘 分类标准版本（{len(vers)} 个）"):
+        if not vers:
+            st.caption("还没有保存过版本。点击侧边栏“保存”时，标准有变化就会自动存为新版本。")
+        else:
+            st.dataframe(pd.DataFrame([{"版本": f"v{v['version']}", "时间": v["time"], "说明": v["note"],
+                                        "类别数": len(v["task"]["labels"]), "规则数": len(v["task"]["rules"])}
+                                       for v in reversed(vers)]), hide_index=True, width="stretch")
+            pick_v = st.selectbox("查看某个版本", [v["version"] for v in reversed(vers)], format_func=lambda x: f"v{x}")
+            vsel = next(v for v in vers if v["version"] == pick_v)
+            prev = next((v for v in vers if v["version"] == pick_v - 1), None)
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"**v{pick_v} 相比上一版**")
+                st.markdown("\n".join(f"- {x}" for x in diff_criteria(prev["task"], vsel["task"])) if prev else "（第一个版本）")
+            with c2:
+                st.markdown("**当前页面上的标准相比 v%d**" % pick_v)
+                st.markdown("\n".join(f"- {x}" for x in diff_criteria(vsel["task"], task)) or "完全相同")
+            if st.button(f"↩ 恢复为 v{pick_v}", help="用这个版本替换页面上的标准；需要长期保留时再点侧边栏保存"):
+                apply_task(raw, vsel["task"])
+                st.rerun()
+
+    # -------- 新任务验证
+    with st.expander("✅ 新任务 / 标准修改后怎么验证"):
+        st.markdown(
+            "1. **抽样**：从要分类的数据里随机抽 100~200 条（下面的工具）。\n"
+            "2. **先让模型分**：在“④ 运行与结果”页运行抽样文件。\n"
+            "3. **人工标注**：在“⑤ 人工审核”页选“全部样本”逐条确认，再“把已审核样本加入金标准”。模型建议只是参考，拿不准的样本正好暴露标准的漏洞。\n"
+            "4. **划分调参集 / 验证集**（下面的工具）：只用调参集反复修改标准、看判错样本；验证集只在最后跑一次，"
+            "这样得到的准确率才能代表新数据上的表现，而不是“把标准调得只适合这批样本”。\n"
+            "5. **改标准 → 重跑 → 对比**：每次修改后在侧边栏保存（自动存版本），重跑调参集，在“⑥ 历史与对比”页勾选前后两次，"
+            "看准确率变化、显著性和标准差异。已调用过的提示词命中缓存，只有改动影响到的部分才重新付费。\n"
+            "6. **上线后抽检**：定期在“⑤ 人工审核”页抽检“首轮一致通过”的样本；人工改动率明显上升，说明数据变了或标准需要更新。"
+        )
+        n_tbl = pd.DataFrame([{"样本量": n, **{f"准确率 {p:.0%}": f"±{ci_halfwidth(p, n) * 100:.1f} 个百分点" for p in (0.7, 0.8, 0.9)}}
+                              for n in (50, 100, 200, 400, 1000)])
+        st.markdown("**样本量与误差**（95% 置信区间半宽）：比较两个版本时，差异小于误差范围就可能只是随机波动，以“⑥ 历史与对比”页的显著性检验为准。")
+        st.dataframe(n_tbl, hide_index=True, width="stretch")
+
+        st.markdown("**抽样工具**")
+        files = sorted(p.as_posix() for p in Path("data").glob("**/*") if p.suffix.lower() in (".csv", ".xlsx", ".xls", ".jsonl"))
+        c1, c2, c3 = st.columns([2, 1, 1])
+        sf = c1.selectbox("从哪个文件抽样（data 目录）", files, key="pilot_src") if files else None
+        sn = c2.number_input("抽多少条", 10, 5000, 150, 10, key="pilot_n")
+        seed = c3.number_input("随机种子", 0, 9999, 42, key="pilot_seed")
+        slug = re.sub(r"[^0-9A-Za-z_]", "_", Path(cfg_now).stem)
+        if sf and st.button("抽样并保存"):
+            rows = read_training(sf, Path(sf).stat().st_mtime_ns).to_dict("records")
+            picked_rows = sample_rows(rows, int(sn), int(seed))
+            outp = Path("data") / f"{slug}_pilot_{len(picked_rows)}.csv"
+            pd.DataFrame(picked_rows).to_csv(outp, index=False, encoding="utf-8-sig")
+            st.success(f"已保存 {outp.as_posix()}（{len(picked_rows)} 条），到“④ 运行与结果”页选“项目 data 目录中的文件”即可运行。")
+
+        st.markdown("**划分调参集 / 验证集**（需要有标签列）")
+        c1, c2, c3 = st.columns([2, 1, 1])
+        gf = c1.selectbox("已标注文件", files, key="split_src") if files else None
+        ratio = c2.slider("验证集比例", 0.2, 0.7, 0.5, 0.05, key="split_ratio")
+        gcols = list(read_training(gf, Path(gf).stat().st_mtime_ns).columns) if gf else []
+        glab = c3.selectbox("标签列", gcols, index=gcols.index(guess_col(gcols, {"label", "标签", "类别"}, gcols[-1])) if gcols else 0,
+                            key="split_lab") if gcols else None
+        if gf and glab and st.button("分层划分并保存"):
+            rows = read_training(gf, Path(gf).stat().st_mtime_ns).to_dict("records")
+            dev, test = split_dev_test(rows, glab, ratio)
+            stem = Path(gf).with_suffix("")
+            pd.DataFrame(dev).to_csv(f"{stem}_dev.csv", index=False, encoding="utf-8-sig")
+            pd.DataFrame(test).to_csv(f"{stem}_test.csv", index=False, encoding="utf-8-sig")
+            st.success(f"调参集 {stem.as_posix()}_dev.csv（{len(dev)} 条），验证集 {stem.as_posix()}_test.csv（{len(test)} 条）。按类别分层，各类比例与原文件一致。")
 
 # ---------------- ③ 训练数据（可选）
 with tab_train:
@@ -510,8 +748,25 @@ if save_clicked:
     if config_error:
         st.sidebar.error("配置有误，未保存")
     else:
-        save_config(raw, save_path)
-        st.sidebar.success(f"已保存到 {save_path}")
+        target = Path(save_path)
+        if target.exists():
+            base = base_of(target)
+        else:
+            cur = st.session_state.get("cfg_path", "config.yaml")
+            base = base_of(cur) or (None if target.resolve() == Path("config.yaml").resolve() else Path("config.yaml"))
+        save_config_diff(raw, target, base)
+        v = save_version(save_path, raw.get("task"), save_note.strip())
+        st.sidebar.success(f"已保存到 {save_path}" + (f"，分类标准保存为 v{v['version']}" if v else "，分类标准没有变化"))
+        if v and v["version"] > 1:
+            prev = list_versions(save_path)[-2]
+            changed = changed_labels(prev["task"], v["task"])
+            if changed:
+                st.sidebar.warning(f"类别 {changed} 的定义或正反例有变化：按旧标准标注的金标准 / 训练数据中这些类别的样本可能需要复核。")
+
+versions = list_versions(picked)
+saved_as = next((v for v in versions if v["hash"] == criteria_hash(raw.get("task"))), None)
+state = f"v{saved_as['version']}" if saved_as else ("有未保存的修改" if versions else "尚未保存版本")
+version_slot.caption(f"分类标准：{state}（共 {len(versions)} 个版本）。在页面上修改后立即生效；需要长期保留时点击保存。")
 
 # ---------------- ③ 运行与结果
 with tab_run:
@@ -817,6 +1072,7 @@ with tab_history:
             "数据": e["meta"].get("input") or "（未记录）",
             "条数": e["summary"]["n"],
             "方案": settings_text(e["meta"], e["records"]),
+            "标准版本": e["meta"].get("criteria_version") or "",
             "自动采纳": pct(e["summary"]["auto_rate"]),
             "全自动准确率": pct(e["summary"].get("acc")),
             "自动采纳准确率": pct(e["summary"].get("auto_acc")),
@@ -825,8 +1081,8 @@ with tab_history:
             "本次费用": e["summary"]["cost"],
             "不计缓存费用": e["summary"]["full_cost"],
             "路径": e["path"],
-        } for e in shown], columns=["对比", "时间", "备注", "数据", "条数", "方案", "自动采纳", "全自动准确率", "自动采纳准确率",
-                                     "人工兜底后", "大模型调用/条", "本次费用", "不计缓存费用", "路径"])
+        } for e in shown], columns=["对比", "时间", "备注", "数据", "条数", "方案", "标准版本", "自动采纳", "全自动准确率",
+                                     "自动采纳准确率", "人工兜底后", "大模型调用/条", "本次费用", "不计缓存费用", "路径"])
         pct_cfg = st.column_config.NumberColumn(format="%.1f%%")
         yuan_cfg = st.column_config.NumberColumn(format="%.4f 元")
         edited_hist = st.data_editor(
@@ -941,6 +1197,16 @@ with tab_history:
                                             "不计缓存费用": yuan_cfg, "方案": st.column_config.TextColumn(width="large")})
                 if model_cols:
                     st.caption(f"{' / '.join(model_cols)} 列为各模型首轮单独的准确率（级联下只统计被调用的样本）。")
+                ref = selected[0]
+                ref_task = run_criteria(by_path[ref]["meta"])
+                crit_diffs = {run_name[rp]: diff_criteria(ref_task, run_criteria(by_path[rp]["meta"]))
+                              for rp in selected[1:] if ref_task and run_criteria(by_path[rp]["meta"])}
+                if any(crit_diffs.values()):
+                    with st.expander(f"📝 分类标准差异（相对 {run_name[ref]}）", expanded=True):
+                        for n, lines in crit_diffs.items():
+                            st.markdown(f"**{n}**：" + ("与参照相同" if not lines else ""))
+                            for line in lines:
+                                st.markdown(f"- {line}")
                 if gold_map:
                     st.bar_chart(comp_df.set_index("运行")[["全自动准确率", "自动采纳准确率", "人工兜底后"]], stack=False, horizontal=True)
 
