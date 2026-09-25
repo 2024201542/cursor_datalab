@@ -1,0 +1,117 @@
+# ============================================================
+# 多模型互检分类 配置文件
+# 换分类任务时，只需要修改 task 部分；换模型时，只需要修改 models / arbiter 部分
+# ============================================================
+
+task:
+  name: 客服消息意图分类
+  description: 对电商平台用户发来的客服消息进行意图分类，每条消息只能归入一个类别。
+
+  labels:
+    - name: 投诉
+      definition: 用户对商品、服务、物流或工作人员表达明显不满，核心诉求是发泄不满、要求道歉、追责或赔偿。
+      examples:
+        - 快递员态度极其恶劣，把包裹直接扔在门口
+        - 客服一直不回消息，我要投诉
+      counter_examples:
+        - 质量不好，我要退货（核心诉求是办理售后，归为“售后”）
+
+    - name: 咨询
+      definition: 用户询问信息，例如价格、功能、物流进度、平台政策等，没有明显不满，也没有明确要求办理某项业务。
+      examples:
+        - 请问这款耳机支持降噪吗？
+        - 退货的运费谁承担？
+      counter_examples:
+        - 我要退货，运费你们出（明确要求办理，归为“售后”）
+
+    - name: 售后
+      definition: 用户明确要求办理退货、换货、退款、维修等售后操作。
+      examples:
+        - 收到的屏幕有坏点，申请退货
+        - 耳机左耳没声音，要求换货
+
+    - name: 建议
+      definition: 用户对产品、服务或平台功能提出改进意见或新需求。
+      examples:
+        - 建议 App 增加夜间模式
+        - 希望以后包装能更环保一点
+
+    - name: 其他
+      definition: 无法归入以上任何类别的内容，例如闲聊、广告、无意义字符。
+      examples:
+        - 哈哈哈
+        - 加我微信领红包
+
+  # 边界规则：写清楚容易混淆的情况，是减少模型分歧最有效的手段
+  rules:
+    - 同时表达不满并要求退货/退款时，若核心诉求是办理售后操作，归为“售后”；若核心是发泄不满、要求道歉或赔偿，归为“投诉”。
+    - 已经申请售后但对处理进度或结果不满的，归为“投诉”。
+    - 只询问售后政策（例如“能不能退”“运费谁出”）而没有明确要求办理的，归为“咨询”。
+    - 提建议时带有轻微抱怨，但主要内容是改进方案的，归为“建议”。
+
+# ------------------------------------------------------------
+# 参与互检的模型（建议 3 个，且来自不同厂商，避免犯同样的错）
+# provider:
+#   openai    -> 任何 OpenAI 兼容接口（OpenAI / DeepSeek / 通义千问 / 大部分中转站）
+#   anthropic -> Anthropic 原生 /v1/messages 接口
+#   mock      -> 假模型，不需要 API key，用来测试流程（也可以用命令行参数 --mock 一键切换）
+# api_key_env: 从哪个环境变量读取 key（推荐）；也可以直接写 api_key（不推荐，容易泄露）
+# weight: 投票权重；运行 evaluate 后会根据金标准准确率自动生成 output/weights.json
+# mock_accuracy: 仅 mock 模式使用，模拟该模型的准确率
+# ------------------------------------------------------------
+models:
+  - name: gpt
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4o-mini
+    weight: 1.0
+    mock_accuracy: 0.85
+
+  - name: claude
+    provider: anthropic
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+    model: claude-sonnet-4-5
+    weight: 1.0
+    mock_accuracy: 0.85
+
+  - name: deepseek
+    provider: openai
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-chat
+    weight: 1.0
+    mock_accuracy: 0.75
+
+# 仲裁模型：交叉复核后仍有分歧时，由它做最终判断（建议选最强的模型）
+arbiter:
+  name: arbiter
+  provider: openai
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key_env: DASHSCOPE_API_KEY
+  model: qwen-max
+  mock_accuracy: 0.9
+  enabled: true
+
+pipeline:
+  concurrency: 8            # 同时进行的 API 请求数上限
+  min_votes: 2              # 至少需要几个模型给出有效结果才能自动采纳
+  cross_review: true        # 出现分歧时是否进行交叉复核
+  accept_threshold: 0.6     # 复核后：过半模型同意 且 加权得票占比 >= 该值 -> 自动采纳
+  use_arbiter: true         # 复核后仍未通过时，是否交给仲裁模型
+  arbiter_threshold: 0.7    # 仲裁模型置信度 >= 该值才采纳，否则转人工
+  timeout: 60               # 单次请求超时（秒）
+  max_retries: 3            # 网络错误 / 429 / 5xx 时的重试次数
+
+cache:
+  enabled: true             # 缓存模型回复：相同输入不重复调用，节省费用
+  path: .cache/llm_cache.jsonl
+
+# 仅 mock 模式使用：假模型根据关键词决定“正确答案”，再按 mock_accuracy 随机犯错
+mock:
+  keywords:
+    售后: [退货, 退款, 换货, 维修, 返修]
+    投诉: [太差, 投诉, 态度, 骗, 不回, 失望, 恶劣]
+    建议: [建议, 希望, 能不能增加, 最好能]
+    咨询: [请问, 多少钱, 什么时候, 怎么, 吗, 是否]
