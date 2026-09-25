@@ -86,21 +86,104 @@ class _HTMLBlocks(HTMLParser):
             self.parts.append(("text", "".join(self._buf).strip()))
 
 
+def _text_poor(text: str) -> bool:
+    n = sum(1 for ch in text if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+    return n < 20
+
+
+def _page_is_scan(page, text: str) -> bool:
+    """几乎没有文字层，且有一张铺满版面的图，才当作扫描页。带小图标的正文页不识别。"""
+    if not _text_poor(text):
+        return False
+    area = float(page.rect.width * page.rect.height) or 1.0
+    try:
+        infos = page.get_image_info()
+    except Exception:
+        return False
+    for info in infos:
+        box = info.get("bbox") or (0, 0, 0, 0)
+        if (box[2] - box[0]) * (box[3] - box[1]) >= 0.4 * area:
+            return True
+    return False
+
+
+_ocr_engine = None
+
+
+def _get_ocr():
+    global _ocr_engine
+    if _ocr_engine is None:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except ImportError as e:
+            raise ValueError("这份 PDF 是扫描件，需要先安装文字识别：pip install rapidocr-onnxruntime") from e
+        _ocr_engine = RapidOCR()
+    return _ocr_engine
+
+
+def _ocr_page(page) -> list[str]:
+    """把扫描页渲染成图片再识别。同一段里竖向挨得很近的行拼在一起。"""
+    import fitz
+
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+    result, _elapsed = _get_ocr()(pix.tobytes("png"))
+    rows = []
+    for item in result or []:
+        if len(item) < 2:
+            continue
+        box, text = item[0], str(item[1]).strip()
+        score = float(item[2]) if len(item) > 2 else 1.0
+        if not text or score < 0.5:
+            continue
+        ys = [p[1] for p in box]
+        xs = [p[0] for p in box]
+        rows.append((min(ys), max(ys), min(xs), text))
+    rows.sort()
+    paras: list[str] = []
+    buf: list[str] = []
+    prev_bottom = None
+    prev_h = 16.0
+    for top, bottom, _x, text in rows:
+        gap = 0.0 if prev_bottom is None else top - prev_bottom
+        if buf and gap > max(prev_h * 0.8, 10):
+            paras.append(_clean("".join(buf)))
+            buf = []
+        buf.append(text)
+        prev_bottom = bottom
+        prev_h = max(bottom - top, 8)
+    if buf:
+        paras.append(_clean("".join(buf)))
+    return [p for p in paras if p]
+
+
+def _pdf_blocks(data: bytes) -> list[dict]:
+    import fitz
+
+    blocks: list[dict] = []
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        for i, page in enumerate(doc, 1):
+            page_blocks = []
+            for b in page.get_text("blocks"):
+                if len(b) >= 7 and b[6] != 0:
+                    continue
+                text = str(b[4]).strip()
+                if text:
+                    page_blocks.append({"page": i, "text": text, "heading": False})
+            joined = "\n".join(b["text"] for b in page_blocks)
+            if _page_is_scan(page, joined):
+                lines = _ocr_page(page)
+                if lines:
+                    page_blocks = [{"page": i, "text": ln, "heading": False, "ocr": True} for ln in lines]
+            blocks.extend(page_blocks)
+    return blocks
+
+
 def _blocks_of(name: str, data: bytes) -> list[dict]:
     """统一成 {page, text, heading}。page 从 1 计，没有分页的格式为 None。"""
     suffix = Path(name).suffix.lower()
     blocks: list[dict] = []
     if suffix == ".pdf":
-        import fitz
-
-        with fitz.open(stream=data, filetype="pdf") as doc:
-            for i, page in enumerate(doc, 1):
-                for b in page.get_text("blocks"):
-                    if len(b) >= 7 and b[6] != 0:
-                        continue
-                    text = str(b[4]).strip()
-                    if text:
-                        blocks.append({"page": i, "text": text, "heading": False})
+        blocks.extend(_pdf_blocks(data))
     elif suffix == ".docx":
         import docx
 
@@ -153,7 +236,7 @@ def split_document(name: str, data: bytes, min_chars: int = DEFAULT_MIN_CHARS) -
     """切成段落。返回 (段落列表, 统计)。段落还没有按关键词或章节筛选。"""
     blocks = _blocks_of(name, data)
     if not blocks:
-        raise ValueError(f"没有从 {name} 中读到文字（扫描版 PDF 需要先做文字识别）")
+        raise ValueError(f"没有从 {name} 中读到文字。扫描件需要安装 rapidocr-onnxruntime 后再上传。")
     by_page: dict[int, list[str]] = {}
     for b in blocks:
         if b["page"]:
@@ -187,6 +270,7 @@ def split_document(name: str, data: bytes, min_chars: int = DEFAULT_MIN_CHARS) -
             "text": text,
         })
     stat = {"blocks": len(blocks), "kept": len(paras), "dropped": dropped,
+            "ocr_pages": len({b["page"] for b in blocks if b.get("ocr")}),
             "chapters": list(dict.fromkeys(p["chapter"] for p in paras))}
     return paras, stat
 

@@ -266,7 +266,7 @@ GLM_API_KEY=给智谱用的百炼密钥</pre>
       <div class="card reveal"><span class="chip v">校准</span><h3>让置信度说真话</h3><p>模型自报的 90% 实际常常只有 65% 对。用一次带人工标签的运行校准后，可以按「想要多高的准确率」自动算出采纳门槛。</p></div>
       <div class="card reveal"><span class="chip p">协作</span><h3>分歧样本的几种讨论方式</h3><p>多轮辩论、魔鬼代言人、只看理由或只看结论的复核、要求引用原文、多个模型组成评审团代替单个仲裁。都是开关，默认关闭。</p></div>
     </div>
-    <div class="call" style="margin-top:18px"><strong>还不能做：</strong>三级及以上的层级；把很长的对话先摘要再分类；扫描版 PDF（没有文字层的图片）；从年报里按字段抽取「减排目标是多少」这种结构化信息；输入股票代码自动下载年报。这些在介绍页的路线图里，还没有做。</div>
+    <div class="call" style="margin-top:18px"><strong>还不能做：</strong>三级及以上的层级；把很长的对话先摘要再分类；从年报里按字段抽取「减排目标是多少」这种结构化信息；输入股票代码自动下载年报。这些在介绍页的路线图里，还没有做。扫描版 PDF 可以识别，但要先安装 rapidocr-onnxruntime，整页高亮和点击定位还没有做。</div>
   </div>
 </section>
 
@@ -329,7 +329,7 @@ GLM_API_KEY=给智谱用的百炼密钥</pre>
       <h3>顶部先选数据是哪一种</h3>
       <p><strong>普通文本。</strong>上传 CSV、Excel 或 JSONL，或选 <code>data/</code> 里的文件。指定哪一列是正文、哪一列是编号。有人工标签时指定标签列，跑完会出准确率。示例：<code>data/sample.csv</code>、<code>data/gold.csv</code>。</p>
       <p><strong>多轮对话。</strong>选「一行一句」时要有会话编号、角色、内容；<code>customer</code> / <code>agent</code> 会当成用户 / 客服。选「一行一段」时，单元格里按行写「用户：……」「客服：……」。可以整段一个类别，或只分类某一个角色的句子。太长会保留最近的内容。示例：<code>data/sample_dialogue.csv</code>。</p>
-      <p><strong>长文档。</strong>上传一份或多份 PDF、Word、网页、TXT。先看切出来多少段，再用章节和关键词缩小，然后分类。结果区会按文档汇总。示例：<code>data/sample_report.txt</code>。扫描版 PDF 会提示读不出文字。</p>
+      <p><strong>长文档。</strong>上传一份或多份 PDF、Word、网页、TXT。先看切出来多少段，再用章节和关键词缩小，然后分类。结果区会按文档汇总。示例：<code>data/sample_report.txt</code>。扫描版 PDF（整页是图片、几乎没有文字）会在本机识别，一页大约几秒，不调用大模型；需要已安装 rapidocr-onnxruntime。</p>
       <p>三种都一样：先点「预估调用次数和费用」，再点开始运行。第一次建议把「只处理前 N 条」设成 20，确认标签和费用正常再跑全量。运行中关掉页面也不怕，同样的调用会命中缓存。</p>
       <p><strong>「🧪 高级」折叠区</strong>（不懂可以不动，全部关闭时和以前完全一样）：</p>
       <ul>

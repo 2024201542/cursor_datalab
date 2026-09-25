@@ -5,3 +5,4 @@ streamlit>=1.46
 pandas>=2.0
 openpyxl>=3.1
 scikit-learn>=1.3          # 动态示例检索与本地小模型（不用这两项功能可不装）
+rapidocr-onnxruntime>=1.3  # 扫描版 PDF 文字识别（不用这项可不装；文字版 PDF 不需要）

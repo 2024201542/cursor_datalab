@@ -1134,7 +1134,8 @@ with tab_run:
     input_name = "上传文件"
     df = None
     if kind == "长文档":
-        st.caption("上传 PDF / Word / 网页 / TXT。先按章节和关键词缩小范围，一份年报往往有几百段，直接全部分类花费会比较高。扫描版 PDF 读不出文字。")
+        st.caption("上传 PDF / Word / 网页 / TXT。先按章节和关键词缩小范围，一份年报往往有几百段，直接全部分类花费会比较高。"
+                   "扫描版 PDF 会在本机做文字识别（需已安装 rapidocr），每一页大约几秒，不调用大模型。")
         doc_files = st.file_uploader("上传文档（可多份）", type=["pdf", "docx", "html", "htm", "txt", "md"],
                                      accept_multiple_files=True, key="doc_files")
         local_docs = sorted(p.as_posix() for p in Path("data").glob("*")
@@ -1150,7 +1151,8 @@ with tab_run:
             try:
                 got, stat = _split_doc_cached(name, data, int(min_chars))
                 paras.extend(got)
-                stats.append(f"{name}：读到 {stat['blocks']} 块，留下 {stat['kept']} 段")
+                ocr = f"，其中扫描识别 {stat['ocr_pages']} 页" if stat.get("ocr_pages") else ""
+                stats.append(f"{name}：读到 {stat['blocks']} 块，留下 {stat['kept']} 段{ocr}")
             except (ValueError, OSError) as e:
                 st.error(f"{name}：{e}")
         if paras:
