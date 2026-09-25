@@ -10,6 +10,7 @@ from pathlib import Path
 SCOPES = {
     "need_human": "需人工审核的样本",
     "disagree": "首轮有分歧的全部样本",
+    "active": "优先标注：最没把握、且内容不重复的样本",
     "spot": "抽检：首轮一致通过的样本",
     "all": "全部样本",
 }
@@ -73,6 +74,9 @@ def select_queue(records: list[dict], scope: str, spot_n: int = 20, seed: int = 
         return [r for r in records if r["status"] == "need_human"]
     if scope == "disagree":
         return [r for r in records if is_disagreement(r)]
+    if scope == "active":
+        from .evolve import prioritize
+        return prioritize(records)
     if scope == "spot":
         pool = [i for i, r in enumerate(records) if r["status"] == "consensus"]
         picked = sorted(random.Random(seed).sample(pool, min(spot_n, len(pool))))
@@ -130,6 +134,23 @@ def _read_csv_any(path: Path) -> tuple[list[str], list[dict]]:
         except UnicodeDecodeError:
             continue
     raise ValueError(f"无法识别 {path} 的编码")
+
+
+def ingest_reviewed(records: list[dict], reviews: dict[str, dict], train_path: str | Path,
+                    allowed: set[str]) -> tuple[int, int, int]:
+    """把已审核样本写入训练集。标签不在当前类别里的跳过。返回 (新增, 未变化, 更新)。"""
+    from .local_model import upsert_examples
+
+    texts, labels = [], []
+    for r in records:
+        rv = reviews.get(r["id"])
+        if not rv or rv.get("label") not in allowed:
+            continue
+        texts.append(r["text"])
+        labels.append(rv["label"])
+    if not texts:
+        return 0, 0, 0
+    return upsert_examples(train_path, texts, labels)
 
 
 def append_to_gold(records: list[dict], reviews: dict[str, dict], gold_path: str | Path) -> tuple[int, int]:

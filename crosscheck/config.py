@@ -150,6 +150,9 @@ class CacheConfig:
     path: str = ".cache/llm_cache.jsonl"
 
 
+RETRIEVERS = ("tfidf", "embedding")
+
+
 @dataclass
 class FewShotConfig:
     """动态示例：为每条待分类文本从训练集中检索最相似的 k 条已标注样本放进提示词。"""
@@ -158,6 +161,13 @@ class FewShotConfig:
     text_col: str = "text"
     label_col: str = "label"
     max_chars: int = 300
+    retriever: str = "tfidf"  # tfidf 字符 n-gram（免费）/ embedding 向量（调用接口，结果缓存）
+    embed_model: str = "text-embedding-v4"
+    embed_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    embed_api_key_env: str = "DASHSCOPE_API_KEY"
+    embed_dimensions: int = 512
+    embed_price: float = 0.5  # 元 / 百万 token（百炼 text-embedding-v3 / v4 的文本输入价格）
+    auto_ingest: bool = False  # 人工审核确认后，把文本和人工标签写入 path
 
     @property
     def enabled(self) -> bool:
@@ -382,3 +392,10 @@ def _validate(config: Config) -> None:
         raise ValueError("pipeline.min_posterior 需要同时设置校准文件 pipeline.calibration")
     if pc.calibration and t.multi_label:
         raise ValueError("多标签任务暂不支持校准文件（按类别混淆矩阵只适用于单标签）")
+    fs = config.fewshot
+    if fs.retriever not in RETRIEVERS:
+        raise ValueError(f"fewshot.retriever 必须是 {list(RETRIEVERS)} 之一，实际是 {fs.retriever!r}")
+    if not 32 <= fs.embed_dimensions <= 2048:
+        raise ValueError("fewshot.embed_dimensions 必须在 32 到 2048 之间")
+    if fs.embed_price < 0:
+        raise ValueError("fewshot.embed_price 不能为负")

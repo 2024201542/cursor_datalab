@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import csv
 from functools import lru_cache
 from pathlib import Path
 
@@ -86,8 +87,6 @@ class TextClassifier:
 
 def save_examples(path: str | Path, texts: list[str], labels: list[str], append: bool = True) -> tuple[int, int]:
     """写入 text,label 两列的训练集 csv，按文本去重。append=False 时覆盖原文件。返回 (新增条数, 重复跳过条数)。"""
-    import csv
-
     path = Path(path)
     if path.suffix.lower() != ".csv":
         raise ValueError("训练数据文件必须是 .csv")
@@ -107,12 +106,46 @@ def save_examples(path: str | Path, texts: list[str], labels: list[str], append:
         rows.append({"text": t, "label": y})
         seen.add(t)
         added += 1
+    _write_examples(path, rows)
+    return added, skipped
+
+
+def upsert_examples(path: str | Path, texts: list[str], labels: list[str]) -> tuple[int, int, int]:
+    """按文本写入训练集：新文本追加，标签变了就更新，没变则跳过。返回 (新增, 未变化, 更新)。内容没变时不重写文件。"""
+    path = Path(path)
+    if path.suffix.lower() != ".csv":
+        raise ValueError("训练数据文件必须是 .csv")
+    rows: list[dict] = []
+    if path.exists():
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            rows = [{"text": r.get("text", ""), "label": r.get("label", "")} for r in csv.DictReader(f)]
+    pos = {r["text"].strip(): i for i, r in enumerate(rows) if r["text"].strip()}
+    added = skipped = updated = 0
+    for t, y in zip(texts, labels):
+        t, y = str(t).strip(), str(y).strip()
+        if not t or not y:
+            continue
+        i = pos.get(t)
+        if i is None:
+            pos[t] = len(rows)
+            rows.append({"text": t, "label": y})
+            added += 1
+        elif rows[i]["label"] == y:
+            skipped += 1
+        else:
+            rows[i]["label"] = y
+            updated += 1
+    if added or updated:
+        _write_examples(path, rows)
+    return added, skipped, updated
+
+
+def _write_examples(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["text", "label"])
         w.writeheader()
         w.writerows(rows)
-    return added, skipped
 
 
 def _stamp(path: str) -> int:

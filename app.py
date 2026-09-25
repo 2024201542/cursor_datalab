@@ -71,6 +71,7 @@ from crosscheck.prompts import build_classify_prompt
 from crosscheck.review import (
     SCOPES,
     append_to_gold,
+    ingest_reviewed,
     list_runs,
     load_reviews,
     load_run,
@@ -530,6 +531,63 @@ def calibration_section(entries: list[dict], run_name: dict[str, str]) -> None:
         st.rerun()
 
 
+def evolve_section(entries: list[dict], run_name: dict[str, str]) -> None:
+    from crosscheck.evolve import audit, noise_candidates
+
+    st.subheader("优先审核与可疑标签")
+    st.caption("不调用模型。优先审核看的是：只审最没把握的前几条，能抓住多少系统判错，随机抽同样条数平均能抓住多少。"
+               "可疑标签是几个模型很有把握地同意了另一个标签，金标准值得复查；也可能是模型一起错了，所以只列出来，不自动改。")
+    path = st.selectbox("看哪次运行", [e["path"] for e in entries], format_func=lambda p: run_name[p], key="evolve_run")
+    e = next(x for x in entries if x["path"] == path)
+    records = e["records"]
+    if not any(r.get("gold") for r in records):
+        st.caption("这次运行没有标准答案（不是评估运行），算不了能抓住多少错，也列不出可疑标签。")
+        return
+    rows = audit(records)
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                     column_config={"召回": st.column_config.NumberColumn(format="percent")})
+    else:
+        st.caption("系统和标准答案没有不一致的样本。")
+    noise = noise_candidates(records)
+    st.markdown(f"**可能标错的标签**：{len(noise)} 条")
+    if noise:
+        show = [{**r, "文本": (r["text"][:80] + "…") if len(r["text"]) > 80 else r["text"]} for r in noise[:30]]
+        for r in show:
+            r.pop("text", None)
+        st.dataframe(pd.DataFrame(show), hide_index=True, width="stretch",
+                     column_config={"平均置信度": st.column_config.NumberColumn(format="%.2f"),
+                                    "分数": st.column_config.NumberColumn(format="%.2f")})
+
+    st.subheader("搜索更好的边界规则")
+    st.caption("会调用模型并产生费用。模型看着调参集上的错例提出新规则，只在调参集上挑选；留出集用来报告胜出的那一版，不参与挑选。"
+               "默认 36 条。当前规则如果和当初那次运行的提示词一样，会命中缓存、不再扣费。")
+    n_limit = st.number_input("最多用多少条", min_value=15, max_value=200, value=36, key="opt_limit")
+    if st.button("试验规则", key="opt_btn"):
+        snap = (e["meta"].get("config") if e.get("meta") else None) or raw
+        items = [{"id": str(r["id"]), "text": r["text"], "label": r["gold"]}
+                 for r in records if r.get("gold") and r.get("text")]
+        from crosscheck.optimize import format_optimize, optimize_rules
+        try:
+            with st.spinner("正在调参集上比较规则，可能需要几分钟…"):
+                rep = optimize_rules(snap, items, limit=int(n_limit))
+            st.session_state.opt_rep = rep
+            st.session_state.opt_text = format_optimize(rep)
+        except (LLMError, ValueError, OSError) as ex:
+            st.error(str(ex))
+    rep = st.session_state.get("opt_rep")
+    if rep:
+        st.code(st.session_state.get("opt_text") or "")
+        if rep["winner"] != "当前规则":
+            if st.button("用胜出的规则替换当前任务的规则（还要在侧边栏保存）", key="opt_apply"):
+                raw.setdefault("task", {})["rules"] = list(rep["winner_rules"])
+                st.session_state.ver = st.session_state.get("ver", 0) + 1
+                st.toast("已替换“② 分类任务”页的规则，确认后在侧边栏保存")
+                st.rerun()
+        else:
+            st.caption("调参集上没有比当前规则更好的提案。")
+
+
 def pct(v) -> float | None:
     return None if v is None else v * 100
 
@@ -872,7 +930,7 @@ with tab_train:
         "如果手上有同类数据的已标注样本（历史人工标注、公开数据集的训练集、人工审核过的结果），加入后可以开启两项增强：\n"
         "- **动态示例**：每条待分类文本自动附上训练数据中最相似的几条已标注样本，让模型学到这批数据的标注尺度；\n"
         "- **本地小模型**：用训练数据训练一个分类器作为额外一票，它和大模型的出错方式不同，“全票一致”更可信。\n\n"
-        "两项都在本机运行，不额外调用 API。"
+        "动态示例默认在本机比字符相似度，不额外调用 API，也可以改成向量检索（按 token 计费，相同文本会缓存）。本地小模型始终在本机运行。"
     )
 
     st.subheader("当前训练数据")
@@ -982,8 +1040,26 @@ with tab_train:
                         key=f"fs_k_{tv}")
     max_chars = c3.number_input("每个示例最多字符", min_value=50, max_value=2000, step=50,
                                 value=int(fs.get("max_chars", 300)), disabled=not use_fs, key=f"fs_mc_{tv}")
+    use_embed = st.toggle(
+        "用向量检索示例（百炼 text-embedding，约 0.5 元 / 百万 token，相同文本缓存在本机）",
+        value=fs.get("retriever") == "embedding", disabled=not use_fs, key=f"fs_embed_{tv}",
+    )
+    auto_in = st.toggle(
+        "人工审核确认后，自动把这条写入上面的训练数据",
+        value=bool(fs.get("auto_ingest")) and bool(tpath), disabled=not bool(tpath), key=f"fs_auto_{tv}",
+        help="下次分类会把这些人工标签当作示例或本地小模型的训练样本。多标签任务不会自动写入。",
+    )
     if tpath:
-        raw["fewshot"] = {**fs, "k": int(k) if use_fs else 0, "max_chars": int(max_chars)}
+        fs2 = {**fs, "k": int(k) if use_fs else 0, "max_chars": int(max_chars)}
+        if use_embed and use_fs:
+            fs2["retriever"] = "embedding"
+        else:
+            fs2.pop("retriever", None)
+        if auto_in:
+            fs2["auto_ingest"] = True
+        else:
+            fs2.pop("auto_ingest", None)
+        raw["fewshot"] = fs2
 
     has_local = any(m.get("provider") == "local" for m in raw.get("models") or [])
     use_local = st.toggle(
@@ -1008,14 +1084,23 @@ with tab_train:
         with st.expander("🔎 试一试：输入一段文本，看看会检索到哪些示例、本地小模型怎么判"):
             q = st.text_area("文本", key="train_try", height=80).strip()
             if q:
+                from dataclasses import fields as dc_fields
+
+                from crosscheck.config import FewShotConfig
                 from crosscheck.local_model import get_bank, get_classifier
                 try:
-                    with st.spinner("正在加载训练数据…"):
-                        ex = get_bank(tpath, tuple(label_names), tcol, lcol).nearest(q, int(k))
+                    with st.spinner("正在检索…"):
+                        known = {f.name for f in dc_fields(FewShotConfig)}
+                        cfg = FewShotConfig(**{key: val for key, val in (raw.get("fewshot") or {}).items() if key in known})
+                        if cfg.retriever == "embedding" and cfg.enabled:
+                            from crosscheck.embed import get_vector_bank
+                            ex = get_vector_bank(cfg, tuple(label_names)).nearest(q, int(k))
+                        else:
+                            ex = get_bank(tpath, tuple(label_names), tcol, lcol).nearest(q, int(k))
                         pred, prob = get_classifier(tpath, tuple(label_names), tcol, lcol).predict(q)
                     st.markdown(f"本地小模型判断：**{pred}**（概率 {prob:.2f}）")
                     st.dataframe(pd.DataFrame(ex, columns=["最相似的已标注样本", "标签"]), hide_index=True, width="stretch")
-                except (OSError, ValueError, ImportError) as e:
+                except (OSError, ValueError, ImportError, LLMError) as e:
                     st.error(str(e))
 
 if save_clicked:
@@ -1720,6 +1805,7 @@ with tab_history:
             elif advice.get("n", 0) >= 3:
                 st.caption("模型没有给出可直接追加的规则。")
 
+        evolve_section(entries, run_name)
         calibration_section(entries, run_name)
 
 # ---------------- ⑤ 人工审核
@@ -1742,10 +1828,30 @@ with tab_review:
     labels = list(dict.fromkeys([lab["name"] for lab in raw["task"]["labels"]] + seen))
     multi_task = bool(raw["task"].get("multi_label")) or any("|" in lab for lab in seen)
 
+    def _save_reviews() -> None:
+        save_reviews(run_path, reviews)
+        fs_now = raw.get("fewshot") or {}
+        if not fs_now.get("auto_ingest") or not fs_now.get("path"):
+            return
+        if raw["task"].get("multi_label"):
+            st.toast("多标签任务不会自动写入训练数据")
+            return
+        try:
+            added, _skip, updated = ingest_reviewed(
+                records, reviews, fs_now["path"], {lab["name"] for lab in raw["task"]["labels"]})
+        except (OSError, ValueError) as e:
+            st.toast(f"写入训练数据失败：{e}")
+            return
+        if added or updated:
+            st.toast(f"已写入训练数据：新增 {added} 条，更新标签 {updated} 条")
+
     c1, c2, c3 = st.columns([2, 1, 1])
     scope = c1.selectbox("审核范围", list(SCOPES), format_func=SCOPES.get,
                          help="建议除了“需人工审核”外，也定期抽检“首轮一致通过”的样本：模型可能一致地答错")
     spot_n = c2.number_input("抽检条数", min_value=1, max_value=1000, value=20, disabled=scope != "spot")
+    _fs_now = raw.get("fewshot") or {}
+    if _fs_now.get("auto_ingest") and _fs_now.get("path"):
+        st.caption(f"已开启自动入库：确认后写入 {_fs_now['path']}（在“③ 训练数据”页可以关掉）。")
     only_pending = c3.toggle("只显示未审核", value=True)
     queue = select_queue(records, scope, int(spot_n))
     todo = [r for r in queue if r["id"] not in reviews] if only_pending else queue
@@ -1765,6 +1871,9 @@ with tab_review:
         head = f"**第 {idx + 1} / {len(todo)} 条**　·　ID `{rec['id']}`　·　{STATUS_TEXT[rec['status']]}"
         if rec.get("note"):
             head += f"　·　{rec['note']}"
+        if scope == "active":
+            from crosscheck.evolve import why
+            head += f"　·　{why(rec)}"
         if prev:
             head += f"　·　✅ 已审核为「{prev['label']}」"
         st.markdown(head)
@@ -1835,7 +1944,7 @@ with tab_review:
             st.rerun()
         if b2.button("✅ 确认并下一条", type="primary", width="stretch"):
             set_review(reviews, rec, choice, note.strip())
-            save_reviews(run_path, reviews)
+            _save_reviews()
             if not only_pending:
                 st.session_state[idx_key] = idx + 1
             st.rerun()
@@ -1867,7 +1976,7 @@ with tab_review:
                 if lab:
                     set_review(reviews, by_id[row["ID"]], lab, str(_clean(row["备注"], "")).strip())
                     n += 1
-            save_reviews(run_path, reviews)
+            _save_reviews()
             st.session_state.rv_ver = rv_ver + 1
             st.toast(f"已保存 {n} 条")
             st.rerun()
@@ -1878,7 +1987,7 @@ with tab_review:
                 lab = _clean(row["人工标签"], "") or row["模型建议"]
                 set_review(reviews, by_id[row["ID"]], lab, str(_clean(row["备注"], "")).strip())
                 n += 1
-            save_reviews(run_path, reviews)
+            _save_reviews()
             st.session_state.rv_ver = rv_ver + 1
             st.toast(f"已确认 {n} 条")
             st.rerun()

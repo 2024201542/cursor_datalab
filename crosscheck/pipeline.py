@@ -117,7 +117,11 @@ class CrossCheckPipeline:
             fs = self.config.fewshot
             if fs.enabled:
                 try:
-                    self.bank = get_bank(fs.path, tuple(self.config.task.label_names), fs.text_col, fs.label_col)
+                    if fs.retriever == "embedding":
+                        from .embed import get_vector_bank
+                        self.bank = get_vector_bank(fs, tuple(self.config.task.label_names))
+                    else:
+                        self.bank = get_bank(fs.path, tuple(self.config.task.label_names), fs.text_col, fs.label_col)
                 except (OSError, ValueError, ImportError) as e:
                     raise LLMError(f"动态示例无法读取训练数据 {fs.path}：{e}") from e
             self.calibration = load_calibration(self.config)
@@ -301,6 +305,9 @@ class CrossCheckPipeline:
         on_result: Callable[[ItemResult], None] | None = None,
     ) -> list[ItemResult]:
         """on_result 在每条样本处理完时调用（用于写断点文件）。"""
+        prep = getattr(self.bank, "prepare", None)
+        if prep is not None:
+            prep([it["text"] for it in items])
         item_sem = asyncio.Semaphore(self.config.pipeline.concurrency * 2)
         total, done, start = len(items), 0, time.monotonic()
         step = max(1, total // 20)
@@ -329,4 +336,11 @@ class CrossCheckPipeline:
             out[f"{self.arbiter.name}(仲裁)"] = dict(self.arbiter.stats)
         for j in self.jury:
             out[f"{j.name}(评审团)"] = dict(j.stats)
+        bank = self.bank
+        tokens = int(getattr(bank, "tokens", 0) or 0)
+        if tokens:
+            price = float(getattr(getattr(bank, "fs", None), "embed_price", 0) or 0)
+            out["向量检索"] = {"calls": int(getattr(bank, "new_texts", 0) or 0), "cache_hits": 0, "errors": 0,
+                           "in_tokens": tokens, "out_tokens": 0, "estimated_calls": 0,
+                           "cost": tokens * price / 1_000_000, "saved": 0.0}
         return out

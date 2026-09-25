@@ -54,6 +54,7 @@ def write_meta(run_path: str | Path, *, source: str, input_name: str, config, ra
             "cascade_min_confidence": pc.cascade_min_confidence,
             "shuffle_labels": config.task.shuffle_labels,
             "fewshot": fs.path if fs.enabled else "",
+            "retriever": fs.retriever if fs.enabled and fs.retriever != "tfidf" else "",
             "accept_threshold": pc.accept_threshold,
             "arbiter_threshold": pc.arbiter_threshold,
             "calibration": pc.calibration,
@@ -142,7 +143,7 @@ def settings_text(meta: dict, records: list[dict]) -> str:
     models = [m["name"] for m in meta.get("models") or []] or ([p["model"] for p in records[0]["round1"]] if records else [])
     parts = [" / ".join(models)]
     if s.get("fewshot"):
-        parts.append("动态示例")
+        parts.append("动态示例" + ("·向量" if s.get("retriever") == "embedding" else ""))
     if s.get("shuffle_labels"):
         parts.append("选项随机")
     if s.get("cascade"):

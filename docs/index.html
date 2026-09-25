@@ -685,8 +685,8 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
         <ul><li class="y">按类别的权重（混淆矩阵）</li><li class="y">置信度校准：ECE 0.06–0.36 → 0.03–0.14</li><li class="y">Self-Consistency</li><li class="y">Logprobs 置信度</li><li class="y">Wawa · MACE · GLAD，交叉验证选最优</li><li class="y">按目标准确率找门槛：有本地小模型时 +3.6–6.0pp</li></ul></div></div>
       <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.5</b><h3>高级协作模式</h3><span class="chip g">已完成</span></div>
         <ul><li class="y">多轮辩论（实测只增加一致）</li><li class="y">魔鬼代言人对抗从众</li><li class="y">证据引用 · 无证据降权</li><li class="y">对照式复核：只看理由 / 只看结论</li><li class="y">评审团模式（PoLL）</li><li class="y">多标签 / 层级分类</li></ul></div></div>
-      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.6</b><h3>闭环自进化</h3></div>
-        <ul><li class="y">动态 Few-shot（TF-IDF 检索）</li><li>向量检索 · 人工结果入库</li><li class="y">分歧样本上建议规则</li><li>DSPy 提示词优化</li><li>主动学习</li><li>cleanlab 标签噪声检测</li></ul></div></div>
+      <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.6</b><h3>闭环自进化</h3><span class="chip g">已完成</span></div>
+        <ul><li class="y">动态示例：字符检索或向量检索（股吧邻居命中 47% → 59%）</li><li class="y">人工审核自动写入训练集</li><li class="y">优先标注：年报气候前 20 条抓住 48% 的错</li><li class="y">可疑标签，只列出来不自动改</li><li class="y">规则搜索：留出集上没有超过当前规则</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.7</b><h3>蒸馏与工程化</h3></div>
         <ul><li class="y">本地小模型投票</li><li>小模型蒸馏</li><li>FastAPI 服务</li><li class="y">质量漂移监控</li><li>本地模型 Ollama / vLLM</li></ul></div></div>
       <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.8</b><h3>对话分类</h3><span class="chip g">已完成</span></div>

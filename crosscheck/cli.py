@@ -261,6 +261,88 @@ def cmd_ping(args) -> None:
     asyncio.run(_ping(load_config(args.config, mock=args.mock)))
 
 
+def _read_eval(path: str) -> list[dict]:
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def cmd_evolve(args) -> None:
+    """不调用模型：优先审核能抓住多少错，以及哪些标准答案和模型的一致意见相反。"""
+    from .evolve import audit, local_gain, noise_candidates
+
+    records = _read_eval(args.input)
+    pct = lambda x: f"{x * 100:.1f}%"
+    rows = audit(records)
+    print(f"[主动学习] {sum(1 for r in records if r.get('gold'))} 条有标准答案")
+    if not rows:
+        print("  没有可以比较的判错（缺少 gold，或系统和标准答案完全一致）。")
+    else:
+        print(f"  {'排序':<24} {'审核':>4}  抓住  召回    随机期望")
+        for r in rows:
+            print(f"  {r['排序']:<24} {r['审核条数']:>4}  {r['抓住的错']:>3}/{r['错误总数']:<3}  {pct(r['召回']):>6}  {r['随机期望']:>6}")
+    noise = noise_candidates(records)
+    print(f"\n[可能标错的标签] {len(noise)} 条：至少 2 个模型以 ≥ 0.75 的平均置信度同意另一个标签")
+    for r in noise[:20]:
+        text = (r["text"] or "").replace("\n", " ")
+        if len(text) > 60:
+            text = text[:60] + "…"
+        print(f"  {r['gold']} → {r['suspect']}  {r['同意该标签的模型数']}/{r['模型数']} 个模型  置信度 {r['平均置信度']:.2f}  {text}")
+    if not noise:
+        print("  没有。")
+    if args.train:
+        from .local_model import load_examples
+
+        labels = sorted({r.get("gold") for r in records if r.get("gold")})
+        texts, ys = load_examples(args.train, labels)
+        pool = [r for r in records if r.get("gold") and r.get("text")]
+        print(f"\n[加进本地小模型] 训练集 {len(texts)} 条；把金标准里的 k 条加进去后，在其余金标准上的准确率")
+        for k in (20, 50):
+            if len(pool) <= k + 1:
+                continue
+            active = local_gain(texts, ys, pool, k, "active")
+            rand = [local_gain(texts, ys, pool, k, "random", seed=s) for s in range(5)]
+            rand_s = sum(x or 0 for x in rand) / len(rand)
+            print(f"  加 {k} 条：按不确定度 {pct(active or 0)}，随机 5 次平均 {pct(rand_s)}")
+
+
+def _optimize_items(path: str, text_col: str, label_col: str) -> list[dict]:
+    if str(path).endswith(".jsonl"):
+        items = []
+        for r in _read_eval(path):
+            gold = r.get("gold") or r.get(label_col)
+            if gold and r.get(text_col):
+                items.append({"id": str(r.get("id")), "text": r[text_col], "label": gold})
+        return items
+    return read_items(path, text_col=text_col, label_col=label_col)
+
+
+def cmd_optimize(args) -> None:
+    from .optimize import format_optimize, optimize_rules
+
+    raw = read_raw_config(args.config)
+    if args.mock:
+        for key in ("models", "jury"):
+            for m in raw.get(key) or []:
+                if m.get("provider") != "local":
+                    m["provider"] = "mock"
+        if isinstance(raw.get("arbiter"), dict) and raw["arbiter"].get("provider") != "local":
+            raw["arbiter"]["provider"] = "mock"
+    items = _optimize_items(args.input, args.text_col, args.label_col)
+    if not items:
+        raise ValueError("没有带标准答案的样本")
+    rep = optimize_rules(raw, items, limit=args.limit, holdout_ratio=args.holdout, log=print)
+    text = format_optimize(rep)
+    print("\n" + text)
+    out = Path(args.output)
+    if args.output == "output" or out.is_dir():
+        out = out / "optimize_report.txt"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text + "\n\n胜出的规则：\n" + "\n".join(f"- {r}" for r in rep["winner_rules"]), encoding="utf-8")
+    print(f"\n已写入 {out}")
+    if rep["winner"] != "当前规则":
+        print("规则没有自动写进配置。确认留出集上确实更好之后，再复制到分类任务里。")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m crosscheck", description="多模型互检分类")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -307,6 +389,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("ping", help="测试各模型 API 是否可用")
     common(p, with_io=False)
     p.set_defaults(func=cmd_ping)
+
+    p = sub.add_parser("evolve", help="不调用模型：主动学习能抓住多少错、哪些标签可能标错")
+    p.add_argument("input", help="evaluate 输出的 eval.jsonl")
+    p.add_argument("-c", "--config", default="config.yaml")
+    p.add_argument("--train", help="训练集 csv。给出后，比较把优先样本加进本地小模型的效果")
+    p.set_defaults(func=cmd_evolve)
+
+    p = sub.add_parser("optimize", help="在金标准上搜索边界规则（会调用模型，留出集只评一次）")
+    p.add_argument("input", help="金标准 .csv / .jsonl，或 evaluate 的 eval.jsonl")
+    p.add_argument("--label-col", default="label")
+    p.add_argument("--limit", type=int, default=36, help="最多用多少条（默认 36），按类别比例抽取")
+    p.add_argument("--holdout", type=float, default=0.34, help="留出集比例，只用于报告、不参与挑选")
+    common(p)
+    p.set_defaults(func=cmd_optimize)
     return parser
 
 
