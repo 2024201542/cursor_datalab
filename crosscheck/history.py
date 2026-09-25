@@ -56,6 +56,16 @@ def write_meta(run_path: str | Path, *, source: str, input_name: str, config, ra
             "fewshot": fs.path if fs.enabled else "",
             "accept_threshold": pc.accept_threshold,
             "arbiter_threshold": pc.arbiter_threshold,
+            "calibration": pc.calibration,
+            "min_posterior": pc.min_posterior,
+            "samples": pc.samples,
+            "debate_rounds": pc.debate_rounds,
+            "devil_advocate": pc.devil_advocate,
+            "review_view": pc.review_view,
+            "require_evidence": pc.require_evidence,
+            "jury": [j.name for j in config.jury] if pc.use_arbiter else [],
+            "multi_label": config.task.multi_label,
+            "hierarchical": config.task.hierarchical,
         },
         "cost": round(sum(s.get("cost", 0.0) for s in stats.values()), 6),
         "saved": round(sum(s.get("saved", 0.0) for s in stats.values()), 6),
@@ -138,9 +148,28 @@ def settings_text(meta: dict, records: list[dict]) -> str:
     if s.get("cascade"):
         th = s.get("cascade_min_confidence") or 0
         parts.append(f"级联[{'+'.join(s['cascade'])}{f' ≥{th:g}' if th else ''}]")
+    if (s.get("samples") or 1) > 1:
+        parts.append(f"采样×{s['samples']}")
+    if s.get("require_evidence"):
+        parts.append("证据引用")
+    if s.get("calibration"):
+        parts.append("校准" + (f"[后验≥{s['min_posterior']:g}]" if s.get("min_posterior") else ""))
     action = s.get("disagreement_action")
     if action:
         parts.append({"human": "分歧转人工", "arbiter": "分歧仲裁", "review": "复核投票"}.get(action, action))
+    if action == "review":
+        if (s.get("debate_rounds") or 1) > 1:
+            parts.append(f"辩论≤{s['debate_rounds']}轮")
+        if s.get("devil_advocate"):
+            parts.append("魔鬼代言人")
+        if s.get("review_view") in ("reasons", "labels"):
+            parts.append({"reasons": "只看理由", "labels": "只看标签"}[s["review_view"]])
+    if s.get("jury") and action != "human":
+        parts.append(f"评审团[{'+'.join(s['jury'])}]")
+    if s.get("multi_label"):
+        parts.append("多标签")
+    if s.get("hierarchical"):
+        parts.append("层级")
     return "，".join(parts)
 
 
@@ -156,10 +185,14 @@ def summarize(records: list[dict], meta: dict | None = None, gold: dict[str, str
     n = len(records)
     auto = [r for r in records if r["status"] != STATUS_HUMAN]
     local = {m["name"] for m in meta.get("models") or [] if m.get("provider") in LOCAL_PROVIDERS} or {"local"}
-    llm_calls = sum(
-        sum(1 for p in (r["round1"] + (r.get("round2") or [])) if p["model"] not in local) + (1 if r.get("arbiter") else 0)
-        for r in records
-    )
+    def calls_of(r: dict) -> int:
+        rounds = r.get("debate") or [r.get("round2") or []]
+        n = sum(len(p.get("samples") or [0]) for p in r["round1"] if p["model"] not in local)
+        n += sum(1 for rnd in rounds for p in rnd if p["model"] not in local)
+        n += len(r.get("jury") or []) or (1 if r.get("arbiter") else 0)
+        return n + (1 if r.get("devil") else 0)
+
+    llm_calls = sum(calls_of(r) for r in records)
     out = {
         "n": n,
         "auto_rate": len(auto) / n if n else 0.0,

@@ -134,9 +134,11 @@ def cmd_evaluate(args) -> None:
     config = load_config(args.config, mock=args.mock)
     items = read_items(args.input, args.text_col, args.id_col, label_col=args.label_col)
     labels = config.task.label_names
-    bad = sorted({it["label"] for it in items} - set(labels))
+    bad = sorted({it["label"] for it in items if config.task.normalize_gold(it["label"]) is None})
     if bad:
         raise ValueError(f"金标准中存在配置里没有的标签: {bad}")
+    for it in items:
+        it["label"] = config.task.normalize_gold(it["label"])
 
     loaded = _load_weights(args.weights)
     _check_budget(config, items, args)
@@ -150,7 +152,7 @@ def cmd_evaluate(args) -> None:
     _print_summary(results, stats, elapsed)
 
     weights = {m.name: m.weight for m in config.models} | (loaded or {})
-    rep = evaluate(results, gold, model_names, labels, weights)
+    rep = evaluate(results, gold, model_names, labels, weights, config.task.multi_label, config.task.hierarchical)
     text = format_report(rep, labels)
     out = Path(args.output)
     (out / "weights.json").write_text(json.dumps(rep["suggested_weights"], ensure_ascii=False, indent=2), encoding="utf-8")
@@ -198,8 +200,52 @@ def cmd_aggregate(args) -> None:
     print(f"\n与互检流水线结果不一致: {diff}/{len(records)} 条\n已保存: {path}")
 
 
+def cmd_calibrate(args) -> None:
+    from .calibrate import (calibration_report, compare_aggregators, crossfit_posteriors, fit_calibration,
+                            pick_threshold, posterior_curve, simulate_thresholds)
+
+    config = load_config(args.config)
+    labels = config.task.label_names
+    with open(args.input, encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    if not any(r.get("gold") in labels for r in records):
+        raise ValueError("结果文件中没有可用的标准答案（需要 evaluate 生成的 eval.jsonl）")
+    pct = lambda x: "—" if x is None else f"{x * 100:.1f}%"
+
+    cmp = compare_aggregators(records, labels)
+    print(f"[聚合方式对比] {cmp['n']} 条金标准；需要标准答案的方法用 {cmp['folds']} 折交叉验证")
+    for r in cmp["rows"]:
+        print(f"  {r['方法']:<18} {pct(r['准确率'])}{'  (交叉验证)' if r['需要标准答案'] else ''}")
+    print(f"  推荐：{cmp['best']}")
+
+    print("\n[置信度校准] ECE 越小越好（校准后的数字为交叉拟合）")
+    for r in calibration_report(records, labels):
+        after = "—" if r["校准后 ECE"] is None else f"{r['校准后 ECE']:.3f}"
+        print(f"  {r['模型']:<12} 准确率 {pct(r['准确率'])}  平均置信度 {pct(r['平均置信度'])}  "
+              f"ECE {r['校准前 ECE']:.3f} → {after}（{r['方法']}）")
+
+    target = args.target
+    curve = posterior_curve(crossfit_posteriors(records, labels))
+    best = pick_threshold(curve, target)
+    print(f"\n[阈值搜索] 目标：自动采纳部分的准确率 ≥ {pct(target)}")
+    if best:
+        print(f"  min_posterior = {best['门槛']:g}：自动采纳 {pct(best['自动采纳比例'])}，准确率 {pct(best['自动采纳准确率'])}")
+    else:
+        top = max((r for r in curve if r["自动采纳准确率"] is not None), key=lambda r: r["自动采纳准确率"], default=None)
+        print("  按后验概率无法达到目标" + (f"（最高 {pct(top['自动采纳准确率'])}，自动采纳 {pct(top['自动采纳比例'])}）" if top else ""))
+    sim = pick_threshold(simulate_thresholds(records, labels), target)
+    if sim and (sim["accept_threshold"] is not None or sim["arbiter_threshold"] is not None):
+        print(f"  accept_threshold = {sim['accept_threshold']}，arbiter_threshold = {sim['arbiter_threshold']}："
+              f"自动采纳 {pct(sim['自动采纳比例'])}，准确率 {pct(sim['自动采纳准确率'])}（按已有复核 / 仲裁记录模拟）")
+
+    cal = fit_calibration(records, labels, source=Path(args.input).as_posix())
+    path = cal.save(args.output)
+    print(f"\n校准文件：{path}\n使用方法：在配置的 pipeline 中加入 calibration: {path.as_posix()}"
+          + (f" 和 min_posterior: {best['门槛']:g}" if best else ""))
+
+
 async def _ping(config: Config) -> None:
-    targets = config.models + ([config.arbiter] if config.arbiter else [])
+    targets = config.models + ([config.arbiter] if config.arbiter else []) + config.jury
     async with httpx.AsyncClient(timeout=config.pipeline.timeout) as http:
         for m in targets:
             start = time.monotonic()
@@ -250,6 +296,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-c", "--config", default="config.yaml")
     p.add_argument("-o", "--output", default="output")
     p.set_defaults(func=cmd_aggregate)
+
+    p = sub.add_parser("calibrate", help="用 evaluate 的结果拟合校准文件、比较聚合方式、搜索阈值（不调用模型）")
+    p.add_argument("input", help="evaluate 输出的 eval.jsonl")
+    p.add_argument("-c", "--config", default="config.yaml")
+    p.add_argument("-o", "--output", default="output/calibration.json", help="校准文件保存路径")
+    p.add_argument("--target", type=float, default=0.95, help="自动采纳部分的目标准确率（默认 0.95）")
+    p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("ping", help="测试各模型 API 是否可用")
     common(p, with_io=False)

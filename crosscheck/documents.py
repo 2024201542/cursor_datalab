@@ -225,7 +225,11 @@ def aggregate_documents(records: list, extra: dict) -> tuple[list[dict], str]:
     def get(r, key):
         return r[key] if isinstance(r, dict) else getattr(r, key)
 
-    labels = list(dict.fromkeys(get(r, "label") for r in records if get(r, "label")))
+    def labs(r):
+        # 多标签结果写成 "A|B"，每个标签分别计数
+        return [x for x in (get(r, "label") or "").split("|") if x]
+
+    labels = list(dict.fromkeys(x for r in records for x in labs(r)))
     pos, neg = _tone_labels(labels)
     by_doc: dict[str, list] = {}
     for r in records:
@@ -233,7 +237,7 @@ def aggregate_documents(records: list, extra: dict) -> tuple[list[dict], str]:
         by_doc.setdefault(info.get("doc") or "（未分组）", []).append(r)
     rows = []
     for doc, recs in by_doc.items():
-        counts = Counter(get(r, "label") or "（无标签）" for r in recs)
+        counts = Counter(x for r in recs for x in (labs(r) or ["（无标签）"]))
         n = len(recs)
         row = {"文档": doc, "段落数": n}
         for lab in labels:

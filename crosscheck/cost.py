@@ -35,6 +35,8 @@ def estimate_run(config: Config, items: list[dict], disagree_rate: float = 0.25)
     是否一致，事先无法知道，所以给出三档：最少（全部一致）、预计（按 disagree_rate 的比例出现分歧）、
     最多（全部分歧），这些环节一律按未命中缓存计算。
     """
+    from dataclasses import replace
+
     from .classifier import LLMCache
     from .local_model import get_bank
     from .prompts import SYSTEM_PROMPT, build_classify_prompt, prompt_seed
@@ -43,7 +45,12 @@ def estimate_run(config: Config, items: list[dict], disagree_rate: float = 0.25)
     cache = LLMCache(config.cache.path, config.cache.enabled)
     bank = get_bank(fs.path, tuple(config.task.label_names), fs.text_col, fs.label_col) if fs.enabled else None
     first = set(pc.cascade) if pc.cascade else {m.name for m in config.models}
-    uses_arbiter = config.arbiter is not None and pc.use_arbiter and pc.disagreement_action != "human"
+    escalate = pc.use_arbiter and pc.disagreement_action != "human"
+    jury = config.jury if escalate else []
+    uses_arbiter = config.arbiter is not None and escalate and not jury
+    reviewing = pc.disagreement_action == "review" and pc.cross_review
+    rounds = pc.debate_rounds if reviewing else 0
+    ev = pc.require_evidence
     n = len(items)
 
     rows = {}
@@ -51,9 +58,11 @@ def estimate_run(config: Config, items: list[dict], disagree_rate: float = 0.25)
         rows[m.name] = {"billable": m.provider not in ("local", "mock"), "r1_calls": 0, "r1_cached": 0, "r1_in": 0}
     sys_tokens = estimate_tokens(SYSTEM_PROMPT)
     review_extra = 0
+    samplers = {m.name: replace(m, temperature=pc.sample_temperature) for m in config.models
+                if pc.samples > 1 and (not pc.sample_models or m.name in pc.sample_models)}
     for it in items:
         ex = bank.nearest(it["text"], fs.k) if bank is not None else None
-        user = build_classify_prompt(config.task, it["text"], ex, fs.max_chars)
+        user = build_classify_prompt(config.task, it["text"], ex, fs.max_chars, evidence=ev)
         tokens = sys_tokens + estimate_tokens(user)
         for m in config.models:
             r = rows[m.name]
@@ -61,12 +70,16 @@ def estimate_run(config: Config, items: list[dict], disagree_rate: float = 0.25)
                 continue
             if config.task.shuffle_labels:
                 user = build_classify_prompt(config.task, it["text"], ex, fs.max_chars,
-                                             prompt_seed(config.task, m.name, it["text"]))
-            if cache.get(LLMCache.make_key(m, SYSTEM_PROMPT, user)) is not None:
-                r["r1_cached"] += 1
-            else:
-                r["r1_calls"] += 1
-                r["r1_in"] += tokens
+                                             prompt_seed(config.task, m.name, it["text"]), evidence=ev)
+            keys = [LLMCache.make_key(m, SYSTEM_PROMPT, user)]
+            if m.name in samplers:
+                keys += [LLMCache.make_key(samplers[m.name], SYSTEM_PROMPT, user, f"sample{k}") for k in range(1, pc.samples)]
+            for key in keys:
+                if cache.get(key) is not None:
+                    r["r1_cached"] += 1
+                else:
+                    r["r1_calls"] += 1
+                    r["r1_in"] += tokens
         review_extra += tokens
     cache.close()
     avg_in = review_extra / n if n else 0
@@ -74,6 +87,12 @@ def estimate_run(config: Config, items: list[dict], disagree_rate: float = 0.25)
     opinions = len(config.models) - 1
     review_in = avg_in + 60 * opinions
     arb_in = avg_in + 60 * len(config.models)
+
+    # 魔鬼代言人由仲裁模型（没有仲裁模型时由第一个大模型）担任，每条分歧样本多 1 次调用
+    devil_by = None
+    if reviewing and pc.devil_advocate:
+        devil_by = (config.arbiter.name if config.arbiter and pc.use_arbiter
+                    else next((m.name for m in config.models if m.provider != "local"), None))
 
     def scenario(rate: float) -> dict:
         out, total, total_calls = [], 0.0, 0
@@ -85,7 +104,10 @@ def estimate_run(config: Config, items: list[dict], disagree_rate: float = 0.25)
             share = 1.0 if m.name in first else rate
             calls = r["r1_calls"] * share
             tin = r["r1_in"] * share
-            if pc.disagreement_action == "review" and pc.cross_review:
+            if rounds:
+                calls += n * rate * rounds
+                tin += n * rate * rounds * review_in
+            if devil_by == m.name:
                 calls += n * rate
                 tin += n * rate * review_in
             tout = calls * DEFAULT_OUT_TOKENS
@@ -95,17 +117,23 @@ def estimate_run(config: Config, items: list[dict], disagree_rate: float = 0.25)
             total += c
             total_calls += calls
         a = config.arbiter
+        extra = []
         if uses_arbiter:
-            calls = n * rate
+            extra.append((a, "仲裁", 2 if devil_by == a.name else 1))
+        elif a is not None and devil_by == a.name:
+            extra.append((a, "魔鬼代言人", 1))
+        extra += [(j, "评审团", 1) for j in jury]
+        for a, role, times in extra:
+            calls = n * rate * times
             tin, tout = calls * arb_in, calls * arbiter_out_tokens(a)
             c = cost_of(a, tin, tout)
-            out.append({"模型": f"{a.name}（仲裁）", "调用次数": round(calls), "缓存命中": 0,
+            out.append({"模型": f"{a.name}（{role}）", "调用次数": round(calls), "缓存命中": 0,
                         "输入 token": round(tin), "输出 token": round(tout), "费用": c})
             total += c
             total_calls += calls
         return {"rows": out, "cost": total, "calls": round(total_calls)}
 
-    targets = config.models + ([config.arbiter] if uses_arbiter else [])
+    targets = config.models + ([config.arbiter] if uses_arbiter else []) + jury
     unpriced = [m.name for m in targets if m.provider not in ("local", "mock") and not priced(m)]
     return {
         "n": n,

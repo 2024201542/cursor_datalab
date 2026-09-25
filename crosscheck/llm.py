@@ -174,6 +174,7 @@ class MockLLM(BaseLLM):
         super().__init__(cfg)
         self.labels = labels
         self.keywords = keywords
+        self._calls = 0  # 温度 > 0 时每次回答不同，用于模拟 Self-Consistency 采样
 
     def _truth(self, text: str) -> str:
         for label, words in self.keywords.items():
@@ -186,7 +187,11 @@ class MockLLM(BaseLLM):
         m = _TEXT_RE.search(user)
         text = m.group(1) if m else user
         reviewing = "<peer_opinions>" in user
-        rng = random.Random(f"{self.cfg.name}|{text}|{reviewing}")
+        seed = f"{self.cfg.name}|{text}|{reviewing}"
+        if self.cfg.temperature > 0:
+            self._calls += 1
+            seed += f"|{self._calls}"
+        rng = random.Random(seed)
 
         acc = self.cfg.mock_accuracy
         if reviewing:
@@ -197,10 +202,12 @@ class MockLLM(BaseLLM):
         else:
             label = rng.choice([lab for lab in self.labels if lab != truth] or [truth])
             conf = rng.uniform(0.4, 0.8)
-        return json.dumps(
-            {"label": label, "confidence": round(conf, 2), "reason": f"mock 判断为{label}"},
-            ensure_ascii=False,
-        )
+        out = {"label": label, "confidence": round(conf, 2), "reason": f"mock 判断为{label}"}
+        if '"labels"' in user:
+            out = {"labels": [out.pop("label")], **out}
+        if '"evidence"' in user:
+            out["evidence"] = text[:12] if rng.random() < 0.8 else "原文里没有这句话"
+        return json.dumps(out, ensure_ascii=False)
 
 
 class LocalLLM(BaseLLM):

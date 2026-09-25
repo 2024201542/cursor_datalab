@@ -308,7 +308,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
 <nav>
   <a class="logo" href="#top"><span class="logo-mark"></span>CrossCheck <small>v0.3.1</small></a>
   <div class="nav-links">
-    <a href="#problem">思路</a><a href="#pipeline">流程</a><a href="#arch">架构</a>
+    <a href="guide.html">使用说明</a><a href="#problem">思路</a><a href="#pipeline">流程</a><a href="#arch">架构</a>
     <a href="#exp1">第一次检验</a><a href="#exp2">第二次检验</a><a href="#exp3">改进</a><a href="#insight">发现</a><a href="#platform">平台</a><a href="#roadmap">路线图</a>
   </div>
   <a class="gh" href="https://github.com/2024201542/cursor_datalab" target="_blank">GitHub ↗</a>
@@ -324,6 +324,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
     <div class="cta">
       <a class="btn pri" href="#exp1">查看三次检验结果 →</a>
       <a class="btn sec" href="#pipeline">了解工作流程</a>
+      <a class="btn sec" href="guide.html">使用说明</a>
     </div>
     <div class="stats reveal">
       <div class="stat"><div class="v" data-count="4">0</div><div class="k">家异构大模型（3 投票 + 1 仲裁）</div></div>
@@ -680,10 +681,10 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
         <ul><li class="y">级联调用：本地 + DeepSeek 一致即采纳，费用降到 40%</li><li class="y">断点续跑</li><li class="y">Token 与费用统计</li><li class="y">运行前费用预估 · 预算上限</li><li class="y">置信度级联：费用 ↔ 准确率可调</li><li class="y">选项顺序随机化（实测无位置偏好）</li></ul></div></div>
       <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.3.1</b><h3>任务库与分类标准管理</h3><span class="chip g">已完成</span></div>
         <ul><li class="y">任务库：新建 / 复制任务，模型配置自动继承</li><li class="y">上传标准文档生成标准草稿</li><li class="y">从已标注数据归纳标准（实测与手写相当）</li><li class="y">标准体检</li><li class="y">标准版本 · 差异 · 恢复</li><li class="y">验证向导：抽样 · 调参集 / 验证集</li></ul></div></div>
-      <div class="ms doing reveal"><div class="card"><div class="hd"><b>v0.4</b><h3>更强的聚合与校准</h3></div>
-        <ul><li>按类别的权重</li><li>置信度校准</li><li>Self-Consistency</li><li class="y">Logprobs 置信度</li><li>动态阈值搜索</li></ul></div></div>
-      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.5</b><h3>高级协作模式</h3></div>
-        <ul><li>多轮辩论</li><li>魔鬼代言人对抗从众</li><li>证据引用</li><li>评审团模式（PoLL）</li><li>多标签 / 层级分类</li></ul></div></div>
+      <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.4</b><h3>更强的聚合与校准</h3><span class="chip g">已完成</span></div>
+        <ul><li class="y">按类别的权重（混淆矩阵）</li><li class="y">置信度校准：ECE 0.06–0.36 → 0.03–0.14</li><li class="y">Self-Consistency</li><li class="y">Logprobs 置信度</li><li class="y">Wawa · MACE · GLAD，交叉验证选最优</li><li class="y">按目标准确率找门槛：有本地小模型时 +3.6–6.0pp</li></ul></div></div>
+      <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.5</b><h3>高级协作模式</h3><span class="chip g">已完成</span></div>
+        <ul><li class="y">多轮辩论（实测只增加一致）</li><li class="y">魔鬼代言人对抗从众</li><li class="y">证据引用 · 无证据降权</li><li class="y">对照式复核：只看理由 / 只看结论</li><li class="y">评审团模式（PoLL）</li><li class="y">多标签 / 层级分类</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.6</b><h3>闭环自进化</h3></div>
         <ul><li class="y">动态 Few-shot（TF-IDF 检索）</li><li>向量检索 · 人工结果入库</li><li class="y">分歧样本上建议规则</li><li>DSPy 提示词优化</li><li>主动学习</li><li>cleanlab 标签噪声检测</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.7</b><h3>蒸馏与工程化</h3></div>
@@ -691,7 +692,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
       <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.8</b><h3>对话分类</h3><span class="chip g">已完成</span></div>
         <ul><li class="y">逐句 / 整段对话导入</li><li class="y">角色感知的提示词</li><li class="y">整段或逐句两种粒度</li><li class="y">长对话保留最近内容</li><li class="y">聊天气泡式审核页</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.9</b><h3>上传年报自动分类</h3></div>
-        <ul><li class="y">PDF / Word / 网页解析</li><li class="y">章节识别与段落切分</li><li class="y">逐段分类</li><li>一段多个标签、扫描件识别</li><li class="y">关键词预筛与文档汇总</li><li class="y">上文 / 本段 / 下文对照审核</li></ul></div></div>
+        <ul><li class="y">PDF / Word / 网页解析</li><li class="y">章节识别与段落切分</li><li class="y">逐段分类 · 一段多个标签</li><li>扫描件识别</li><li class="y">关键词预筛与文档汇总</li><li class="y">上文 / 本段 / 下文对照审核</li></ul></div></div>
     </div>
   </div>
 </section>

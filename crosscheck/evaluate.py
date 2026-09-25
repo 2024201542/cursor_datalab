@@ -5,6 +5,7 @@ from collections import Counter
 
 from .aggregate import weighted_vote
 from .classifier import Prediction
+from .config import parent_of, split_labels
 from .pipeline import STATUS_HUMAN, STATUS_TEXT, ItemResult
 
 
@@ -55,12 +56,42 @@ def majority_vote(preds: list[Prediction]) -> str | None:
     return max(count, key=lambda lab: (count[lab], conf[lab]))
 
 
-def _per_class(pred_labels: list[str | None], gold_list: list[str], labels: list[str]) -> dict[str, float | None]:
+def _per_class(pred_labels: list[str | None], gold_list: list[str], labels: list[str],
+               multi: bool = False) -> dict[str, float | None]:
+    """每个类别的召回率；多标签时为“真实标签含该类的样本中，预测也含该类”的比例。"""
     out = {}
     for lab in labels:
-        idx = [i for i, g in enumerate(gold_list) if g == lab]
-        out[lab] = sum(pred_labels[i] == lab for i in idx) / len(idx) if idx else None
+        if multi:
+            idx = [i for i, g in enumerate(gold_list) if lab in split_labels(g)]
+            out[lab] = sum(lab in split_labels(pred_labels[i]) for i in idx) / len(idx) if idx else None
+        else:
+            idx = [i for i, g in enumerate(gold_list) if g == lab]
+            out[lab] = sum(pred_labels[i] == lab for i in idx) / len(idx) if idx else None
     return out
+
+
+def multilabel_scores(pred_labels: list[str | None], gold_list: list[str], labels: list[str]) -> dict[str, float]:
+    """完全一致率、micro-F1、Hamming 准确率（逐类别判断对错的比例）。"""
+    tp = fp = fn = 0
+    ham = 0
+    for p, g in zip(pred_labels, gold_list):
+        ps, gs = set(split_labels(p)), set(split_labels(g))
+        tp += len(ps & gs)
+        fp += len(ps - gs)
+        fn += len(gs - ps)
+        ham += sum((lab in ps) == (lab in gs) for lab in labels)
+    n = len(gold_list)
+    prec = tp / (tp + fp) if tp + fp else 0.0
+    rec = tp / (tp + fn) if tp + fn else 0.0
+    return {
+        "exact": sum(p == g for p, g in zip(pred_labels, gold_list)) / n if n else 0.0,
+        "micro_f1": 2 * prec * rec / (prec + rec) if prec + rec else 0.0,
+        "hamming": ham / (n * len(labels)) if n and labels else 0.0,
+    }
+
+
+def level1_acc(pred_labels: list[str | None], gold_list: list[str]) -> float:
+    return sum(parent_of(p) == parent_of(g) for p, g in zip(pred_labels, gold_list)) / len(gold_list) if gold_list else 0.0
 
 
 def _label_acc(pred_labels: list[str | None], gold_list: list[str]) -> float:
@@ -73,6 +104,8 @@ def evaluate(
     model_names: list[str],
     labels: list[str],
     weights: dict[str, float] | None = None,
+    multi_label: bool = False,
+    hierarchical: bool = False,
 ) -> dict:
     results = [r for r in results if r.id in gold]
     gold_list = [gold[r.id] for r in results]
@@ -95,11 +128,16 @@ def evaluate(
     strategies = {
         name: {
             "acc": per_model[name]["round1_acc"] if name in per_model else _label_acc(preds, gold_list),
-            "per_class": _per_class(preds, gold_list, labels),
+            "per_class": _per_class(preds, gold_list, labels, multi_label),
             "kind": "model" if name in model_names else "ensemble",
         }
         for name, preds in strategy_preds.items()
     }
+    extra = {}
+    if multi_label:
+        extra["multilabel"] = {name: multilabel_scores(preds, gold_list, labels) for name, preds in strategy_preds.items()}
+    if hierarchical:
+        extra["level1"] = {name: level1_acc(preds, gold_list) for name, preds in strategy_preds.items()}
     any_correct = sum(
         any(p.ok and p.label == g for p in r.round1) for r, g in zip(results, gold_list)
     ) / N if N else 0.0
@@ -148,6 +186,7 @@ def evaluate(
             {"id": r.id, "text": r.text, "gold": g, "pred": r.label, "status": r.status}
             for r, g in zip(results, gold_list) if r.label != g
         ],
+        **extra,
     }
 
 
@@ -158,6 +197,13 @@ def format_report(rep: dict, labels: list[str]) -> str:
         tag = "单模型" if v["kind"] == "model" else "组合"
         lines.append(f"  {tag:<4} {name:<10} {pct(v['acc']):>7}")
     lines.append(f"  参考   任一模型答对（理论上限） {pct(rep['any_correct'])}")
+    if rep.get("multilabel"):
+        lines += ["", "[多标签] 完全一致 / micro-F1 / Hamming 准确率"]
+        for name, v in rep["multilabel"].items():
+            lines.append(f"  {name:<10} {pct(v['exact']):>7} / {v['micro_f1']:.3f} / {pct(v['hamming'])}")
+    if rep.get("level1"):
+        lines += ["", "[层级] 一级类准确率"]
+        lines += [f"  {name:<10} {pct(v):>7}" for name, v in rep["level1"].items()]
 
     lines += ["", "[单个模型：交叉复核前后]"]
     for m, v in rep["per_model"].items():

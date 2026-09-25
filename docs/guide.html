@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CrossCheck · 使用说明</title>
+<style>
+:root{
+  --bg:#04060d;--bg2:#0a0f1c;--line:rgba(148,163,184,.12);--line2:rgba(148,163,184,.22);
+  --text:#e6edf7;--muted:#8b98b0;--dim:#5b6780;
+  --cyan:#22d3ee;--blue:#60a5fa;--violet:#a78bfa;--pink:#f472b6;--green:#34d399;--amber:#fbbf24;--red:#fb7185;
+  --mono:"JetBrains Mono","Cascadia Code",Consolas,"SFMono-Regular",monospace;
+  --sans:"Inter","PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.75;overflow-x:hidden;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+::selection{background:rgba(34,211,238,.3)}
+.bg-grid{position:fixed;inset:0;z-index:-3;
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:56px 56px;mask-image:radial-gradient(ellipse 80% 60% at 50% 0%,#000 30%,transparent 80%);opacity:.55}
+.bg-glow{position:fixed;z-index:-2;border-radius:50%;filter:blur(120px);opacity:.28;pointer-events:none}
+.bg-glow.g1{width:640px;height:640px;background:var(--cyan);top:-240px;left:-160px}
+.bg-glow.g2{width:560px;height:560px;background:var(--violet);top:30vh;right:-220px;opacity:.2}
+.bg-glow.g3{width:520px;height:520px;background:var(--pink);bottom:-260px;left:30vw;opacity:.12}
+.progress{position:fixed;top:0;left:0;height:2px;width:0;z-index:60;background:linear-gradient(90deg,var(--cyan),var(--violet),var(--pink));box-shadow:0 0 12px var(--cyan)}
+nav{position:fixed;top:0;left:0;right:0;z-index:50;display:flex;align-items:center;justify-content:space-between;
+  padding:14px 36px;background:rgba(4,6,13,.55);backdrop-filter:blur(16px);border-bottom:1px solid var(--line)}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.5px}
+.logo-mark{width:26px;height:26px;border-radius:7px;position:relative;background:linear-gradient(135deg,var(--cyan),var(--violet));box-shadow:0 0 18px rgba(34,211,238,.45)}
+.logo-mark::after{content:"";position:absolute;inset:6px;border:2px solid var(--bg);border-radius:50%}
+.logo small{font-family:var(--mono);color:var(--muted);font-weight:400;font-size:12px}
+.nav-links{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+.nav-links a{font-size:13.5px;color:var(--muted);padding:6px 12px;border-radius:8px;transition:.2s}
+.nav-links a:hover,.nav-links a.on{color:var(--text);background:rgba(255,255,255,.06)}
+.gh{font-family:var(--mono);font-size:12.5px;padding:7px 14px;border:1px solid var(--line2);border-radius:9px;color:var(--text);transition:.2s;white-space:nowrap}
+.gh:hover{border-color:var(--cyan);box-shadow:0 0 16px rgba(34,211,238,.25)}
+section{position:relative;padding:108px 0 20px}
+.wrap{max-width:1100px;margin:0 auto;padding:0 32px}
+.tag{font-family:var(--mono);font-size:12.5px;color:var(--cyan);letter-spacing:2px;text-transform:uppercase;display:flex;align-items:center;gap:10px}
+.tag::before{content:"";width:28px;height:1px;background:linear-gradient(90deg,transparent,var(--cyan))}
+h2{font-size:34px;line-height:1.25;margin:14px 0 14px;letter-spacing:-.4px}
+h3{font-size:18px;margin:22px 0 8px}
+.grad{background:linear-gradient(100deg,#fff 10%,var(--cyan) 45%,var(--violet) 75%,var(--pink));-webkit-background-clip:text;background-clip:text;color:transparent}
+.lead{color:var(--muted);font-size:16.5px;max-width:780px}
+.card{position:relative;background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.015));border:1px solid var(--line);
+  border-radius:18px;padding:24px 26px;backdrop-filter:blur(10px)}
+.card p,.card li{color:var(--muted);font-size:14.5px}
+.card strong,.prose strong{color:var(--text);font-weight:600}
+.grid{display:grid;gap:16px}
+.g2{grid-template-columns:repeat(2,1fr)}.g3{grid-template-columns:repeat(3,1fr)}
+.mono{font-family:var(--mono)}
+.muted{color:var(--muted)}
+.reveal{opacity:0;transform:translateY(22px);transition:opacity .7s ease,transform .7s cubic-bezier(.2,.8,.2,1)}
+.reveal.in{opacity:1;transform:none}
+.chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--muted)}
+.chip.c{color:var(--cyan);border-color:rgba(34,211,238,.35);background:rgba(34,211,238,.06)}
+.chip.v{color:var(--violet);border-color:rgba(167,139,250,.35);background:rgba(167,139,250,.06)}
+.chip.g{color:var(--green);border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.06)}
+.chip.a{color:var(--amber);border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.06)}
+.chip.p{color:var(--pink);border-color:rgba(244,114,182,.35);background:rgba(244,114,182,.06)}
+.hero{min-height:88vh;display:flex;align-items:center;padding-top:90px;overflow:hidden}
+#net{position:absolute;inset:0;z-index:-1;opacity:.8}
+.badge{display:inline-flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12.5px;color:var(--muted);
+  border:1px solid var(--line2);border-radius:999px;padding:6px 14px 6px 8px;background:rgba(255,255,255,.03)}
+.badge i{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green)}
+.hero h1{font-size:64px;line-height:1.08;letter-spacing:-1.5px;margin:22px 0 18px;font-weight:800}
+.hero h1 .sub{display:block;font-size:26px;letter-spacing:0;font-weight:600;color:var(--text);margin-top:12px}
+.hero p.lead{font-size:17.5px}
+.cta{display:flex;gap:12px;margin-top:28px;flex-wrap:wrap}
+.btn{padding:12px 20px;border-radius:12px;font-size:14.5px;font-weight:600;transition:.25s;display:inline-flex;gap:8px;align-items:center}
+.btn.pri{background:linear-gradient(135deg,var(--cyan),var(--violet));color:#05070f}
+.btn.pri:hover{transform:translateY(-2px)}
+.btn.sec{border:1px solid var(--line2);background:rgba(255,255,255,.03)}
+.btn.sec:hover{border-color:var(--violet)}
+.prose p{color:var(--muted);margin:10px 0}
+.prose ul,.prose ol{margin:8px 0 8px 1.2em;color:var(--muted)}
+.prose li{margin:6px 0}
+.prose code,.card code{font-family:var(--mono);font-size:.92em;color:var(--cyan);background:rgba(34,211,238,.08);padding:1px 6px;border-radius:6px}
+pre{margin:14px 0;padding:16px 18px;border-radius:14px;background:#070b16;border:1px solid var(--line2);overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.7;color:#dbe7f5}
+pre .c{color:var(--dim)}
+.mtable{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:12px}
+.mtable td,.mtable th{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.mtable th{color:var(--dim);font-weight:500;font-size:12px;font-family:var(--mono);letter-spacing:.4px}
+.mtable td:first-child{font-weight:600;white-space:nowrap}
+.steps{display:flex;flex-direction:column;gap:14px;margin-top:22px}
+.step{display:grid;grid-template-columns:64px 1fr;gap:8px;align-items:start}
+.step .n{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;font-family:var(--mono);font-weight:700;
+  background:radial-gradient(circle at 30% 30%,#1b2440,#0a0f1c);border:1px solid rgba(34,211,238,.4);box-shadow:0 0 24px rgba(34,211,238,.18)}
+.step h3{margin:4px 0 6px}
+.call{border-left:3px solid var(--amber);background:rgba(251,191,36,.06);border-radius:0 14px 14px 0;padding:14px 16px;margin:14px 0;color:var(--muted);font-size:14.5px}
+.call.ok{border-color:var(--green);background:rgba(52,211,153,.06)}
+.call.bad{border-color:var(--red);background:rgba(251,113,133,.06)}
+.call strong{color:var(--text)}
+.page-no{font-family:var(--mono);color:var(--cyan);font-size:13px;margin-bottom:4px}
+footer{margin-top:80px;border-top:1px solid var(--line);padding:36px 0 56px;color:var(--dim);font-size:13px}
+footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+footer a{color:var(--muted)}
+footer a:hover{color:var(--cyan)}
+@media (max-width:900px){
+  .g2,.g3{grid-template-columns:1fr}
+  .hero h1{font-size:42px}
+  nav{padding:12px 16px}
+  .nav-links{display:none}
+  .step{grid-template-columns:48px 1fr}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}.reveal{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="bg-grid"></div>
+<div class="bg-glow g1"></div><div class="bg-glow g2"></div><div class="bg-glow g3"></div>
+
+<nav>
+  <a class="logo" href="index.html"><span class="logo-mark"></span>CrossCheck <small>使用说明</small></a>
+  <div class="nav-links">
+    <a href="#start">拿到之后</a>
+    <a href="#keys">配置密钥</a>
+    <a href="#what">能做什么</a>
+    <a href="#how">怎么实现</a>
+    <a href="#use">怎么操作</a>
+    <a href="#faq">常见问题</a>
+  </div>
+  <a class="gh" href="https://github.com/2024201542/cursor_datalab" target="_blank">仓库 ↗</a>
+</nav>
+
+<section class="hero" id="top">
+  <canvas id="net"></canvas>
+  <div class="wrap">
+    <span class="badge"><i></i>给拿到这个系统的人 · 从安装到第一次分类</span>
+    <h1><span class="grad">使用说明</span><span class="sub">对方拿到之后，按这一页就能自己跑起来</span></h1>
+    <p class="lead">CrossCheck 是装在自己电脑上的网页工具，不是一个已经部署好的网站。把仓库地址发给对方即可，不要把本机的 <code>.env</code> 一起发过去。对方用自己的 API 密钥，费用记在对方账号上。密钥可以在网页里填，也可以写成文件。百炼那一把密钥默认同时给 Kimi、千问和智谱用，也可以拆成各填各的。</p>
+    <div class="cta">
+      <a class="btn pri" href="#start">从安装开始 →</a>
+      <a class="btn sec" href="#keys">密钥怎么填</a>
+      <a class="btn sec" href="index.html">项目介绍</a>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap prose">
+    <div class="tag">01 · 拿到之后</div>
+    <h2>把仓库地址发过去，<span class="grad">对方在自己电脑上运行</span></h2>
+    <p>仓库地址：<a href="https://github.com/2024201542/cursor_datalab" target="_blank"><strong>https://github.com/2024201542/cursor_datalab</strong></a>。如果仓库是私有的，要先在 GitHub 上把对方加为协作者，否则对方打不开。</p>
+    <div class="call bad"><strong>不要发送 <code>.env</code>，也不要把密钥写进微信或邮件。</strong> 这个文件里是你自己的 DeepSeek 和百炼密钥。对方用你的密钥跑分类，费用从你的账号扣。仓库已经忽略了这个文件，<code>git clone</code> 不会把它带上。<code>output/</code> 里的历史结果也不用发，对方自己运行会重新生成。</div>
+
+    <div class="steps">
+      <div class="step reveal"><div class="n">1</div><div>
+        <h3>安装 Python</h3>
+        <p>需要 Python 3.10 或更高。装好后在终端里执行 <code>python --version</code> 能看到版本号。Windows 上如果提示找不到命令，安装时勾选 “Add python.exe to PATH”，或改用 Anaconda / Miniconda 的终端。</p>
+      </div></div>
+      <div class="step reveal"><div class="n">2</div><div>
+        <h3>克隆仓库</h3>
+<pre>git clone https://github.com/2024201542/cursor_datalab.git
+cd cursor_datalab</pre>
+        <p>没有装 git 时，可以在仓库页面点 Code → Download ZIP，解压后进入那个文件夹。两种方式拿到的都是同一套代码，都不含密钥。</p>
+      </div></div>
+      <div class="step reveal"><div class="n">3</div><div>
+        <h3>安装依赖</h3>
+<pre>pip install -r requirements.txt
+pip install python-docx pymupdf</pre>
+        <p>第二行是读 Word 和 PDF 用的。只做表格里的短文本分类可以不装，但年报和上传标准文档会用到。</p>
+      </div></div>
+      <div class="step reveal"><div class="n">4</div><div>
+        <h3>启动网页</h3>
+<pre>python -m streamlit run app.py</pre>
+        <p>浏览器打开 <strong>http://localhost:8501</strong>。这个地址只在对方自己的电脑上有效，别人的浏览器打不开你正在跑的这一份。关掉终端，网页就停了。想给实验室里的人一起用，每个人都在自己电脑上执行上面的命令。</p>
+      </div></div>
+      <div class="step reveal"><div class="n">5</div><div>
+        <h3>先不配密钥也可以看界面</h3>
+        <p>到「④ 运行与结果」打开 <strong>mock 模式</strong>，不调用真实接口，只走通流程。要得到真实分类结果，再按下一节填入自己的密钥。</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<section id="keys">
+  <div class="wrap prose">
+    <div class="tag">02 · 密钥</div>
+    <h2>两把就够用。<span class="grad">百炼那把可以共用，也可以拆开。</span></h2>
+    <p>打开网页后进入 <strong>① 模型配置</strong>，往下翻过模型表格，最下面有一块标题是 <strong>API Key</strong>。密钥只写在这里，或者写在项目根目录的 <code>.env</code> 里。模型表格中的「Key 环境变量」是这个密钥的<strong>名字</strong>，不是密钥本身。</p>
+    <div class="call"><strong>输入框是密码框，已经保存的密钥不会显示出来，所以看起来是空的。</strong>旁边如果写着「已配置（…后四位）」，说明这台电脑上已经有了。要更换，就把新密钥粘贴进去再点「保存 Key」。留空再点保存，表示保持原样、不修改。保存之后写进本机的 <code>.env</code>，下次打开还在，也不会被提交到仓库。</div>
+
+    <h3>现在仓库里默认怎么接</h3>
+    <p>投票模型是 DeepSeek、Kimi、千问，仲裁模型是智谱 GLM。Kimi、千问、GLM 三行的「Key 环境变量」都写成了 <code>DASHSCOPE_API_KEY</code>，接口地址都是阿里云百炼。网页按这个名字去重，所以<strong>只出现一个百炼输入框</strong>，填进去的那一把同时给这三个模型用。这是有意这样配的：百炼上可以开通多家的模型，一把密钥就能调。</p>
+    <table class="mtable">
+      <tr><th>页面上的名字</th><th>实际模型</th><th>接口</th><th>密钥名字</th><th>默认</th></tr>
+      <tr><td>deepseek</td><td>deepseek-flash</td><td>api.deepseek.com</td><td><code>DEEPSEEK_API_KEY</code></td><td>单独一把，必填</td></tr>
+      <tr><td>kimi</td><td>kimi-k2.6</td><td>百炼</td><td><code>DASHSCOPE_API_KEY</code></td><td>和下面两行共用</td></tr>
+      <tr><td>qwen</td><td>qwen3.7-plus</td><td>百炼</td><td><code>DASHSCOPE_API_KEY</code></td><td>和上下两行共用</td></tr>
+      <tr><td>glm（仲裁）</td><td>glm-5.3</td><td>百炼</td><td><code>DASHSCOPE_API_KEY</code></td><td>和上面两行共用</td></tr>
+      <tr><td>kimi-official</td><td>kimi-k2.6</td><td>api.moonshot.cn</td><td><code>MOONSHOT_API_KEY</code></td><td>默认关闭，不用填</td></tr>
+    </table>
+
+    <h3>推荐做法：先申请两把，在网页里填</h3>
+    <div class="grid g2" style="margin-top:14px">
+      <div class="card">
+        <span class="chip c">DeepSeek</span>
+        <h3 style="margin-top:10px">DEEPSEEK_API_KEY</h3>
+        <p>打开 <a href="https://platform.deepseek.com" target="_blank">platform.deepseek.com</a>，注册后创建 API key。只给表格里的 deepseek 这一行用。</p>
+      </div>
+      <div class="card">
+        <span class="chip v">阿里云百炼</span>
+        <h3 style="margin-top:10px">DASHSCOPE_API_KEY</h3>
+        <p>打开 <a href="https://bailian.console.aliyun.com" target="_blank">bailian.console.aliyun.com</a>，创建 API key。在模型广场确认能调用 <code>kimi-k2.6</code>、<code>qwen3.7-plus</code>、<code>glm-5.3</code>，没有开通的模型要先开通。这一把同时给 Kimi、千问、GLM。</p>
+      </div>
+    </div>
+    <p>两把都粘贴到对应输入框，点 <strong>保存 Key</strong>，再点 <strong>测试所有模型连通性</strong>。每一行都成功，就可以去运行页分类。测试失败时，先看是密钥错了、模型没开通，还是网络访问不了对应的接口。</p>
+
+    <h3>可以分开填，页面就是按「名字」决定共不共用</h3>
+    <p>密钥输入框的数量，等于模型表格里「Key 环境变量」这一列有多少个<strong>不同的名字</strong>。三个模型都写 <code>DASHSCOPE_API_KEY</code>，就只有一个框。把某一行改成别的名字，下面就会多出一个框，这一行不再读那把百炼密钥。</p>
+    <p>名字只是本机 <code>.env</code> 里的标签，可以自己起。改完表格后，到左侧栏点 <strong>保存</strong>，模型地址和名字才会写入配置文件。密钥仍要点下面的「保存 Key」，侧边栏那个保存按钮不写密钥。</p>
+
+    <div class="card" style="margin-top:16px">
+      <h3>情形一：还是用百炼，但想各备一把密钥</h3>
+      <p>比如一个百炼账号只开了千问，另一个账号开了 Kimi 和 GLM。在模型表格里把它们的「Key 环境变量」改成不同名字，接口地址可以保持百炼不变：</p>
+      <table class="mtable">
+        <tr><th>模型</th><th>接口地址保持</th><th>把「Key 环境变量」改成</th></tr>
+        <tr><td>kimi</td><td>https://dashscope.aliyuncs.com/compatible-mode/v1</td><td><code>KIMI_API_KEY</code></td></tr>
+        <tr><td>qwen</td><td>同上</td><td><code>QWEN_API_KEY</code></td></tr>
+        <tr><td>glm</td><td>同上</td><td><code>GLM_API_KEY</code></td></tr>
+      </table>
+      <p>保存配置后，API Key 区会变成三个框。每个框粘贴对应账号的百炼密钥，再点「保存 Key」。DeepSeek 仍然单独用 <code>DEEPSEEK_API_KEY</code>。</p>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3>情形二：不用百炼，改走各家官方接口</h3>
+      <p>这才是真正换供应商。除了密钥名字，还要改「接口地址」和「模型」列，并在对应平台开通那个模型。</p>
+      <table class="mtable">
+        <tr><th>想换成</th><th>在表格里改什么</th><th>密钥去哪里申请</th></tr>
+        <tr><td>Kimi 官方</td><td>把现有 kimi 那一行取消勾选。把已经写好、默认关闭的 <code>kimi-official</code> 勾上启用。它的地址是 <code>https://api.moonshot.cn/v1</code>，密钥名字是 <code>MOONSHOT_API_KEY</code>。官方接口当前限额很低（同时 1 个请求、每分钟 3 次），量大时仍建议走百炼。</td><td><a href="https://platform.moonshot.cn" target="_blank">platform.moonshot.cn</a></td></tr>
+        <tr><td>智谱官方</td><td>仲裁模型 glm 的接口地址改为 <code>https://open.bigmodel.cn/api/paas/v4</code>，模型名改成你账号里实际有的型号，「Key 环境变量」改为 <code>ZHIPU_API_KEY</code>。百炼上的 <code>glm-5.3</code> 这个名字在智谱官方不一定存在，要以控制台里的模型名为准。</td><td><a href="https://open.bigmodel.cn" target="_blank">open.bigmodel.cn</a></td></tr>
+        <tr><td>千问官方 / 其他中转</td><td>改 qwen 那一行的接口地址、模型名和密钥名字。任何 OpenAI 兼容接口都可以，接口类型保持 <code>openai</code>。</td><td>对应平台的控制台</td></tr>
+      </table>
+      <p>改完：左侧栏保存配置 → 在新出现的输入框里粘贴密钥 → 保存 Key → 再测一次连通性。</p>
+    </div>
+
+    <h3>不想用网页时，直接写 .env</h3>
+    <p>在项目根目录（和 <code>app.py</code> 同一层）新建文本文件，文件名就是 <code>.env</code>。默认两把密钥时写成：</p>
+<pre>DEEPSEEK_API_KEY=这里换成自己的DeepSeek密钥
+DASHSCOPE_API_KEY=这里换成自己的百炼密钥</pre>
+    <p>拆开填时，左边的名字必须和模型表格里「Key 环境变量」完全一致，例如：</p>
+<pre>DEEPSEEK_API_KEY=自己的DeepSeek密钥
+KIMI_API_KEY=给Kimi用的百炼密钥
+QWEN_API_KEY=给千问用的百炼密钥
+GLM_API_KEY=给智谱用的百炼密钥</pre>
+    <p>保存文件后重新运行 <code>python -m streamlit run app.py</code>。不要把这个文件提交到 git，也不要发给别人。</p>
+  </div>
+</section>
+
+<section id="what">
+  <div class="wrap">
+    <div class="tag">03 · 能做什么</div>
+    <h2>现在这套系统<span class="grad">已经能做的事</span></h2>
+    <p class="lead">类别和标准都写在配置里，代码不针对某一个数据集。换任务不用改程序。</p>
+    <div class="grid g3" style="margin-top:22px">
+      <div class="card reveal"><span class="chip c">分类</span><h3>短文本分到一个或几个类别</h3><p>客服消息意图、新闻标题、股吧情绪、年报里的一段话、美联储表态，都用同一套流程。默认一条文本一个类别；也可以开启多标签（一条同时属于几类），或把类别写成「一级/二级」做层级分类。</p></div>
+      <div class="card reveal"><span class="chip v">对话</span><h3>多轮对话</h3><p>一行一句（会话编号、角色、内容），或一行一段用「角色：内容」写好的对话。可以整段一个类别，也可以只判断某一句并带上前文。</p></div>
+      <div class="card reveal"><span class="chip p">长文档</span><h3>年报按段分类</h3><p>上传 PDF、Word、网页或 TXT。按章节切开，丢掉目录和套话，可按章节、关键词筛选，再逐段分类，并汇总成每份文档的占比和净语调。</p></div>
+      <div class="card reveal"><span class="chip g">标准</span><h3>分类标准可以变</h3><p>新建任务、从 Word/PDF 或已标注数据生成标准草稿、检查标准里的冲突、每次修改自动留版本，还能恢复旧版本。</p></div>
+      <div class="card reveal"><span class="chip a">质量</span><h3>知道结果可不可信</h3><p>有人工标签时给出准确率。分歧的样本交给人审。历史页可以对比两次运行差多少、是不是偶然，并看标准改了哪里。</p></div>
+      <div class="card reveal"><span class="chip c">成本</span><h3>跑之前能估价</h3><p>按模型和字数预估费用。可以只先问便宜的模型，一致就不再问其余模型。已经问过的文本会进缓存，改标准后只对受影响的部分重新付费。</p></div>
+      <div class="card reveal"><span class="chip v">校准</span><h3>让置信度说真话</h3><p>模型自报的 90% 实际常常只有 65% 对。用一次带人工标签的运行校准后，可以按「想要多高的准确率」自动算出采纳门槛。</p></div>
+      <div class="card reveal"><span class="chip p">协作</span><h3>分歧样本的几种讨论方式</h3><p>多轮辩论、魔鬼代言人、只看理由或只看结论的复核、要求引用原文、多个模型组成评审团代替单个仲裁。都是开关，默认关闭。</p></div>
+    </div>
+    <div class="call" style="margin-top:18px"><strong>还不能做：</strong>三级及以上的层级；把很长的对话先摘要再分类；扫描版 PDF（没有文字层的图片）；从年报里按字段抽取「减排目标是多少」这种结构化信息；输入股票代码自动下载年报。这些在介绍页的路线图里，还没有做。</div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap prose">
+    <div class="tag">04 · 怎么实现</div>
+    <h2>多个模型各判一次，<span class="grad">不一致就交给人</span></h2>
+    <p>分类标准（类别定义、正例、反例、边界规则）会写进提示词。每个启用的模型独立回答，互不知道别人的结论。程序比较它们的标签：</p>
+    <ol>
+      <li><strong>全部一致</strong>：直接采纳。这是质量比较高的信号，但不是证明，所以审核页仍然可以抽检。</li>
+      <li><strong>不一致</strong>：默认把这条标成「需人工审核」，并给出一个建议标签。也可以改成先交叉复核再投票，或先交给仲裁模型（现在是 GLM）。策略在运行页切换。</li>
+      <li><strong>可选的省钱方式</strong>：级联。先只问列出的模型，它们一致（还可以再要求置信度够高）就采纳，不再问贵的模型。</li>
+      <li><strong>可选的增强</strong>：如果有同一任务的已标注数据，可以检索最相似的例子放进提示词，或训练一个本地小模型参加投票。没有这类数据就跳过，不影响基本分类。</li>
+      <li><strong>可选的校准</strong>：拿一次带人工标签的运行，统计每个模型在每个类别上容易把什么错判成什么（混淆矩阵），再把自报置信度换算成真实正确率。之后每条样本都能算出「多数答案是对的」的概率，高于门槛就采纳，即使首轮有分歧；首轮一致但概率低的也交给人。</li>
+    </ol>
+    <p><strong>实测哪些有用。</strong>校准本身很有效：模型的置信度误差（ECE）从 0.06–0.36 降到 0.03–0.14。按校准后的概率挑自动采纳的样本，在投票者里有本地小模型时，同样的自动采纳比例准确率高 3.6–6.0 个百分点；只有几个相似的大模型时没有帮助。换聚合算法（按类别加权、Dawid-Skene、MACE、GLAD 等）差别都在 3 个百分点以内。在股吧情绪的分歧样本上，多轮辩论、魔鬼代言人、对照式复核、评审团、证据引用、多次采样都没有显著提升，最多多对 2 条；多轮辩论只让模型变得更一致，并没有更正确。所以默认仍是「分歧交给人」。</p>
+    <p>模型输出被要求是一行 JSON：标签、置信度、理由。理由里的引号有时会把 JSON 弄坏，程序会再按字段把标签抠出来。每次调用的原文和回复会缓存在本机，同样的提示词不会重复扣费。</p>
+    <p>密钥的读取顺序是：配置里如果直接写了密钥就用那个（不建议）；否则用「Key 环境变量」这个名字，到环境变量和 <code>.env</code> 里取值。所以改表格里的名字，就是在改「这一行模型去读哪一把密钥」。</p>
+    <p>一次运行会在 <code>output/web/时间戳/</code> 写下结果、费用和当时的配置快照（快照里没有密钥）。对话和年报还会多一个文件，用来在审核页还原气泡和章节，而不是只显示送给模型的那一大段提示词。</p>
+  </div>
+</section>
+
+<section id="use">
+  <div class="wrap prose">
+    <div class="tag">05 · 怎么操作</div>
+    <h2>六个页面，<span class="grad">按这个顺序用</span></h2>
+
+    <div class="card reveal" style="margin-top:18px">
+      <div class="page-no">页面 ① · 模型配置</div>
+      <h3>先让模型能连上</h3>
+      <p>表格里可以改启用开关、角色（投票、仲裁或评审团）、接口地址、模型名、价格、并发。评审团成员只在分歧需要仲裁时使用，有评审团就不再用单个仲裁模型。价格只影响页面上的费用估算，不影响厂商实际怎么扣费。改完到左侧栏点保存。</p>
+      <p>密钥按上一节填写并测试。连通性全部成功再往下走。</p>
+    </div>
+
+    <div class="card reveal" style="margin-top:14px">
+      <div class="page-no">页面 ② · 分类任务</div>
+      <h3>告诉模型「什么叫这一类」</h3>
+      <p>左侧栏的下拉框是任务列表，每一项是 <code>configs/</code> 里的一个文件。仓库里已经有客服消息、新闻、股吧情绪、年报气候段落、美联储表态。选中一个，这一页会显示它的类别和规则。</p>
+      <p>做新任务：左侧栏「新建分类任务」。可以从空白开始（仍沿用现在的模型），或复制当前任务。然后：</p>
+      <ul>
+        <li>有书面口径：展开「生成标准草稿」，上传 Word / PDF / TXT，或直接粘贴。先预览，确认后再替换。</li>
+        <li>只有标好的样本、没有成文标准：草稿来源选「从已标注数据归纳」。</li>
+        <li>点「标准体检」，看有没有互相打架的规则和坏例子。</li>
+        <li>左侧栏写一句修改说明再保存。标准真有变化时会自动留下一个版本，可以在本页对比和恢复。</li>
+        <li>一条文本可能同时属于几类：打开「多标签」，设每条最多几个标签。人工标签写成「积极|消极」或「积极、消极」都可以。</li>
+        <li>类别有两级：把类别名写成「投诉/物流」「投诉/质量」这样，再打开「层级分类」。结果会多一个一级类准确率。</li>
+      </ul>
+      <p>本页底部有验证步骤：新任务先抽 100～200 条人工确认，再分成调参集和验证集。只在调参集上反复改标准，验证集留到最后跑一次。100 条样本、准确率大约 80% 时，误差大约 ±8 个百分点，差两三个点看不出来。</p>
+    </div>
+
+    <div class="card reveal" style="margin-top:14px">
+      <div class="page-no">页面 ③ · 训练数据（可以不做）</div>
+      <h3>没有历史标注就跳过</h3>
+      <p>这里的文件是「同类任务里已经标好的例子」，不是这次要分类的新数据。有它才能打开动态示例和本地小模型。标签必须是当前任务里存在的类别。评估时如果待测文本也在这份文件里，页面会提醒准确率会偏高。</p>
+    </div>
+
+    <div class="card reveal" style="margin-top:14px">
+      <div class="page-no">页面 ④ · 运行与结果</div>
+      <h3>顶部先选数据是哪一种</h3>
+      <p><strong>普通文本。</strong>上传 CSV、Excel 或 JSONL，或选 <code>data/</code> 里的文件。指定哪一列是正文、哪一列是编号。有人工标签时指定标签列，跑完会出准确率。示例：<code>data/sample.csv</code>、<code>data/gold.csv</code>。</p>
+      <p><strong>多轮对话。</strong>选「一行一句」时要有会话编号、角色、内容；<code>customer</code> / <code>agent</code> 会当成用户 / 客服。选「一行一段」时，单元格里按行写「用户：……」「客服：……」。可以整段一个类别，或只分类某一个角色的句子。太长会保留最近的内容。示例：<code>data/sample_dialogue.csv</code>。</p>
+      <p><strong>长文档。</strong>上传一份或多份 PDF、Word、网页、TXT。先看切出来多少段，再用章节和关键词缩小，然后分类。结果区会按文档汇总。示例：<code>data/sample_report.txt</code>。扫描版 PDF 会提示读不出文字。</p>
+      <p>三种都一样：先点「预估调用次数和费用」，再点开始运行。第一次建议把「只处理前 N 条」设成 20，确认标签和费用正常再跑全量。运行中关掉页面也不怕，同样的调用会命中缓存。</p>
+      <p><strong>「🧪 高级」折叠区</strong>（不懂可以不动，全部关闭时和以前完全一样）：</p>
+      <ul>
+        <li><strong>校准文件</strong>与<strong>后验概率门槛</strong>：在历史页生成，见页面 ⑥。</li>
+        <li><strong>Self-Consistency</strong>：每个模型多答几次取多数，费用按次数成倍增加，可以只选一两个模型。</li>
+        <li><strong>证据引用</strong>：要求模型逐字引用原文，引用在原文里找不到的判断权重打折。审核页会显示引用。</li>
+        <li><strong>复核最多几轮</strong>、<strong>复核时看到的他人意见</strong>、<strong>魔鬼代言人</strong>：只在分歧策略选「交叉复核」时起作用。</li>
+        <li><strong>评审团采纳门槛</strong>：评审团里同意同一个标签的比例达到多少才采纳。</li>
+      </ul>
+      <p>这些选项都会让预估费用变化，先点预估再运行。</p>
+    </div>
+
+    <div class="card reveal" style="margin-top:14px">
+      <div class="page-no">页面 ⑤ · 人工审核</div>
+      <h3>处理模型没把握的，也抽查模型都同意的</h3>
+      <p>选择刚才那次运行。范围可以是「需人工审核」、全部分歧，或从「首轮一致通过」里随机抽几条。逐条确认，或在表格里批量填写。对话会显示成气泡，理由里逐字引用到的句子会标出来。年报会显示章节、页码和上下段。</p>
+      <p>确认过的样本可以追加进金标准或训练数据，下一次就能用来评估或当作示例。</p>
+    </div>
+
+    <div class="card reveal" style="margin-top:14px">
+      <div class="page-no">页面 ⑥ · 历史与对比</div>
+      <h3>改了标准或换了模型之后，看有没有真的变好</h3>
+      <p>每次运行都有时间、数据、费用、用的哪一版分类标准。勾选两次以上，可以看准确率差多少、McNemar 检验是否只是随机波动，以及两版标准的逐条差异。</p>
+      <p>页底的<strong>漂移监控</strong>把同一任务按时间排开。最近一次的人工比例升高 8 个百分点、准确率下降 5 个百分点，或标签分布变化达到 0.15，会提示。两次用的标准不同时会写明，避免把改口径误当成数据变了。</p>
+      <p><strong>规则建议</strong>读取某次运行里模型意见不同的样本，归纳边界，给出可以直接追加的规则。追加之后还要在左侧栏保存，才会写进文件。</p>
+      <p><strong>校准与门槛</strong>：选一次带人工标签的运行（最好 150 条以上），页面会比较十几种聚合方式、显示每个模型校准前后的置信度误差，并让你拖动「目标准确率」，给出推荐门槛和能自动采纳的比例。达不到目标时会直接说能达到多少。点「保存校准文件并用于当前配置」后，下一次运行就按这个门槛决定哪些自动采纳。类别改过之后要重新校准。</p>
+    </div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap prose">
+    <div class="tag">06 · 常见问题</div>
+    <h2>对方最容易<span class="grad">卡住的地方</span></h2>
+    <div class="grid g2" style="margin-top:18px">
+      <div class="card"><h3>密钥框是空的，是不是没保存上？</h3><p>密码框本来就不回显。看标题右侧是不是「已配置（…四位）」。是的话就已经在 <code>.env</code> 里。</p></div>
+      <div class="card"><h3>只填了百炼，DeepSeek 失败</h3><p>DeepSeek 不走百炼。必须再填 <code>DEEPSEEK_API_KEY</code>，或者在表格里关掉 deepseek 那一行。</p></div>
+      <div class="card"><h3>改了密钥名字，旧密钥还在生效吗？</h3><p>不会自动跟着走。旧名字下的密钥还在 <code>.env</code> 里，但模型已经去读新名字。新框显示「未配置」时，要重新粘贴并保存。</p></div>
+      <div class="card"><h3>侧边栏保存了，为什么密钥丢了？</h3><p>侧边栏保存的是类别、规则、模型地址，不包含密钥。密钥只由「保存 Key」或手改 <code>.env</code> 写入。</p></div>
+      <div class="card"><h3>连通性测试很慢或超时</h3><p>先确认本机能打开对应网站。公司网络或校园网有时拦截境外接口。DeepSeek、Kimi 官方、百炼是不同的地址，可能只有其中一个不通。</p></div>
+      <div class="card"><h3>准确率和我预期差很多</h3><p>先看分类标准，而不是先换模型。用验证向导做一小批人工标签，在历史页对比改标准前后。100 条上差几个点，往往还不能下结论。</p></div>
+      <div class="card"><h3>网页打不开 localhost:8501</h3><p>终端里那条命令必须还在跑。换了一台电脑或把地址发给别人是打不开的，对方要在自己的电脑上启动。</p></div>
+      <div class="card"><h3>要不要打开辩论、评审团这些高级选项？</h3><p>先别开。在我们测过的数据上它们几乎没有提升，却会多花几倍的钱。想试的话，在自己任务的金标准上开一个、跑一次，到历史页和不开时对比。</p></div>
+      <div class="card"><h3>想先零费用看流程</h3><p>运行页打开 mock 模式。它不访问任何厂商，结果不能当成真实准确率。</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>CrossCheck 使用说明 · 与 <a href="index.html">项目介绍</a> 配套，用浏览器直接打开这一页即可</div>
+    <div><a href="https://github.com/2024201542/cursor_datalab" target="_blank">github.com/2024201542/cursor_datalab</a></div>
+  </div>
+</footer>
+
+<script>
+const io = new IntersectionObserver(entries => {
+  entries.forEach(en => { if (en.isIntersecting) { en.target.classList.add("in"); io.unobserve(en.target); } });
+}, { threshold: 0.12 });
+document.querySelectorAll(".reveal").forEach(el => io.observe(el));
+
+const links = [...document.querySelectorAll(".nav-links a")];
+addEventListener("scroll", () => {
+  const h = document.documentElement;
+  const bar = document.getElementById("progress");
+  bar.style.width = (h.scrollTop / (h.scrollHeight - h.clientHeight)) * 100 + "%";
+  let cur = "";
+  document.querySelectorAll("section[id]").forEach(s => { if (s.getBoundingClientRect().top < 140) cur = s.id; });
+  links.forEach(a => a.classList.toggle("on", a.getAttribute("href") === "#" + cur));
+}, { passive: true });
+
+(() => {
+  const cv = document.getElementById("net");
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  const colors = ["34,211,238", "167,139,250", "244,114,182", "96,165,250"];
+  let W, H, pts, dpr = Math.min(2, devicePixelRatio || 1);
+  const resize = () => {
+    W = cv.offsetWidth; H = cv.offsetHeight; cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const n = Math.round(Math.min(70, (W * H) / 18000));
+    pts = Array.from({ length: n }, (_, i) => ({
+      x: Math.random() * W, y: Math.random() * H, vx: (Math.random() - .5) * .3, vy: (Math.random() - .5) * .3,
+      r: i < 4 ? 3 : Math.random() * 1.4 + .5, c: colors[i % 4], hub: i < 4,
+    }));
+  };
+  resize(); addEventListener("resize", resize);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const frame = () => {
+    ctx.clearRect(0, 0, W, H);
+    for (const p of pts) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < 0 || p.x > W) p.vx *= -1;
+      if (p.y < 0 || p.y > H) p.vy *= -1;
+    }
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+      const a = pts[i], b = pts[j], d = Math.hypot(a.x - b.x, a.y - b.y), lim = a.hub || b.hub ? 200 : 120;
+      if (d < lim) {
+        ctx.strokeStyle = `rgba(${a.c},${(1 - d / lim) * .22})`;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+    }
+    for (const p of pts) {
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7);
+      ctx.fillStyle = `rgba(${p.c},${p.hub ? 1 : .65})`;
+      ctx.fill();
+    }
+    if (!reduce) requestAnimationFrame(frame);
+  };
+  frame();
+})();
+</script>
+</body>
+</html>

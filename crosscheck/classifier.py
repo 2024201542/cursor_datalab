@@ -10,10 +10,17 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .config import ModelConfig, TaskConfig
+from .config import ModelConfig, TaskConfig, split_labels
 from .cost import cost_of, estimate_tokens
 from .llm import BaseLLM, LLMError
-from .prompts import SYSTEM_PROMPT, build_arbiter_prompt, build_classify_prompt, build_review_prompt, prompt_seed
+from .prompts import (
+    SYSTEM_PROMPT,
+    build_arbiter_prompt,
+    build_classify_prompt,
+    build_devil_prompt,
+    build_review_prompt,
+    prompt_seed,
+)
 
 
 @dataclass
@@ -25,6 +32,10 @@ class Prediction:
     error: str | None = None
     raw: str = ""
     prob: float | None = None  # 开启 logprobs 时标签的输出概率
+    samples: list[str] | None = None  # Self-Consistency 时每次采样的标签；confidence 为多数答案的占比
+    evidence: str = ""  # 要求证据时模型引用的原文
+    evidence_ok: bool | None = None  # 引用是否确实出现在原文中；None 表示没有要求证据
+    calibrated: float | None = None  # 按校准曲线换算后的“真实正确率”
 
     @property
     def ok(self) -> bool:
@@ -32,7 +43,9 @@ class Prediction:
 
     @property
     def certainty(self) -> float:
-        """级联判断用的置信度：有 logprobs 用输出概率，否则用模型自报的置信度（本地模型为预测概率）。"""
+        """级联判断用的置信度：优先用校准后的值，其次 logprobs 概率，最后是模型自报的置信度（采样时为答案稳定性）。"""
+        if self.calibrated is not None:
+            return self.calibrated
         return self.prob if self.prob is not None else self.confidence
 
     def to_dict(self) -> dict:
@@ -101,6 +114,16 @@ def label_prob(tokens: list[tuple[str, float]] | None) -> float | None:
 
 
 def parse_output(raw: str, labels: list[str]) -> tuple[str, float, str]:
+    label, conf, reason, _ = parse_reply(raw, labels)
+    return label, conf, reason
+
+
+_LOOSE_LABELS = re.compile(r'"labels"\s*:\s*\[([^\]]*)\]')
+_LOOSE_EVIDENCE = re.compile(r'"evidence"\s*:\s*"([^"]*)"')
+
+
+def parse_reply(raw: str, labels: list[str], task: TaskConfig | None = None) -> tuple[str, float, str, str]:
+    """解析模型回复，返回 (标签, 置信度, 理由, 证据)。多标签任务的标签为规范写法“A|B”。"""
     text = _THINK_RE.sub("", raw).strip()
     m = _JSON_RE.search(text)
     if not m:
@@ -110,13 +133,32 @@ def parse_output(raw: str, labels: list[str]) -> tuple[str, float, str]:
     except json.JSONDecodeError as e:
         obj = _loose_fields(m.group(0))
         if obj is None:
-            raise ParseError(f"JSON 格式错误: {e}") from e
+            many = _LOOSE_LABELS.search(m.group(0))
+            if many is None:
+                raise ParseError(f"JSON 格式错误: {e}") from e
+            obj = {"labels": re.findall(r'"([^"]*)"', many.group(1)), "confidence": 0.5}
+        ev = _LOOSE_EVIDENCE.search(m.group(0))
+        if ev:
+            obj["evidence"] = ev.group(1)
     if not isinstance(obj, dict):
         raise ParseError("JSON 不是对象")
 
-    label = normalize_label(str(obj.get("label", "")), labels)
-    if label is None:
-        raise ParseError(f"标签不在候选集合中: {obj.get('label')!r}")
+    if task is not None and task.multi_label:
+        values = obj.get("labels")
+        if values is None:
+            values = obj.get("label", "")
+        if isinstance(values, str):
+            values = split_labels(values)
+        if not isinstance(values, list):
+            raise ParseError(f"labels 不是列表: {values!r}")
+        picked = [normalize_label(str(v), labels) for v in values]
+        if not picked or any(v is None for v in picked):
+            raise ParseError(f"标签不在候选集合中: {values!r}")
+        label = task.join(list(dict.fromkeys(picked))[: task.max_labels])
+    else:
+        label = normalize_label(str(obj.get("label", "")), labels)
+        if label is None:
+            raise ParseError(f"标签不在候选集合中: {obj.get('label')!r}")
 
     try:
         conf = float(obj.get("confidence", 0.5))
@@ -125,7 +167,22 @@ def parse_output(raw: str, labels: list[str]) -> tuple[str, float, str]:
     if 1 < conf <= 100:
         conf /= 100
     conf = min(max(conf, 0.0), 1.0)
-    return label, conf, str(obj.get("reason", "")).strip()
+    return label, conf, str(obj.get("reason", "")).strip(), str(obj.get("evidence") or "").strip()
+
+
+_QUOTE_STRIP = " \t\n\"'“”‘’「」『』《》…."
+_SPACE_RE = re.compile(r"\s+")
+
+
+def evidence_in_text(evidence: str, text: str) -> bool:
+    """证据是否逐字出现在原文中（忽略空白和首尾引号；长引用允许用省略号拼接的多段，每段都要在原文中）。"""
+    ev = _SPACE_RE.sub("", evidence).strip(_QUOTE_STRIP)
+    if len(ev) < 2:
+        return False
+    body = _SPACE_RE.sub("", text)
+    pieces = [p.strip(_QUOTE_STRIP) for p in re.split(r"…+|\.{3,}", ev)]
+    pieces = [p for p in pieces if p]
+    return bool(pieces) and all(p in body for p in pieces)
 
 
 class LLMCache:
@@ -152,10 +209,12 @@ class LLMCache:
                         continue
 
     @staticmethod
-    def make_key(cfg: ModelConfig, system: str, user: str) -> str:
+    def make_key(cfg: ModelConfig, system: str, user: str, tag: str = "") -> str:
         parts = [cfg.provider, cfg.base_url, cfg.model, cfg.temperature, system, user]
         if cfg.logprobs:
             parts.append("logprobs")  # 开启前缓存的回复没有概率，不能复用
+        if tag:
+            parts.append(tag)  # 同一提示词的多次采样各占一条缓存
         payload = json.dumps(parts, ensure_ascii=False)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -213,9 +272,14 @@ class RateLimiter:
 
 
 class Classifier:
-    def __init__(self, task: TaskConfig, llm: BaseLLM, cache: LLMCache, semaphore: asyncio.Semaphore, max_chars: int = 300):
+    def __init__(self, task: TaskConfig, llm: BaseLLM, cache: LLMCache, semaphore: asyncio.Semaphore, max_chars: int = 300,
+                 *, evidence: bool = False, view: str = "full", sampler: BaseLLM | None = None, samples: int = 1):
         self.task = task
         self.max_chars = max_chars
+        self.evidence = evidence
+        self.view = view
+        self.sampler = sampler  # Self-Consistency 采样用的同一模型（温度不同）
+        self.samples = samples if sampler is not None else 1
         self.llm = llm
         self.cache = cache
         self.sem = semaphore
@@ -232,37 +296,64 @@ class Classifier:
         return prompt_seed(self.task, self.name, text)
 
     async def classify(self, text: str, examples=None) -> Prediction:
-        return await self._call(build_classify_prompt(self.task, text, examples, self.max_chars, self._seed(text)))
+        user = build_classify_prompt(self.task, text, examples, self.max_chars, self._seed(text), self.evidence)
+        first = await self._call(user, text)
+        if self.samples <= 1:
+            return first
+        rest = await asyncio.gather(*(self._call(user, text, self.sampler, f"sample{k}") for k in range(1, self.samples)))
+        return self._self_consistency([first, *rest])
 
-    async def review(self, text: str, own: Prediction | None, peers: list[Prediction], examples=None) -> Prediction:
-        return await self._call(build_review_prompt(self.task, text, own, peers, examples, self.max_chars, self._seed(text)))
+    def _self_consistency(self, runs: list[Prediction]) -> Prediction:
+        valid = [p for p in runs if p.ok]
+        if not valid:
+            return runs[0]
+        count: dict[str, int] = {}
+        conf: dict[str, float] = {}
+        for p in valid:
+            count[p.label] = count.get(p.label, 0) + 1
+            conf[p.label] = conf.get(p.label, 0.0) + p.confidence
+        label = max(count, key=lambda lab: (count[lab], conf[lab]))
+        rep = next(p for p in valid if p.label == label)
+        return Prediction(self.name, label, round(count[label] / len(runs), 3), rep.reason, raw=rep.raw,
+                          samples=[p.label or "失败" for p in runs], evidence=rep.evidence, evidence_ok=rep.evidence_ok)
+
+    async def review(self, text: str, own: Prediction | None, peers: list[Prediction], examples=None,
+                     round_no: int = 1, devil: Prediction | None = None) -> Prediction:
+        return await self._call(build_review_prompt(self.task, text, own, peers, examples, self.max_chars, self._seed(text),
+                                                    self.view, self.evidence, round_no, devil), text)
 
     async def arbitrate(self, text: str, opinions: list[Prediction], examples=None) -> Prediction:
-        return await self._call(build_arbiter_prompt(self.task, text, opinions, examples, self.max_chars, self._seed(text)))
+        return await self._call(build_arbiter_prompt(self.task, text, opinions, examples, self.max_chars, self._seed(text),
+                                                     self.view, self.evidence), text)
 
-    async def _call(self, user: str) -> Prediction:
-        cfg = self.llm.cfg
-        key = LLMCache.make_key(cfg, SYSTEM_PROMPT, user)
-        raw = self.cache.get(key) if self.llm.cacheable else None
+    async def devil(self, text: str, majority: str, supporters: list[Prediction], examples=None) -> Prediction:
+        return await self._call(build_devil_prompt(self.task, text, majority, supporters, examples, self.max_chars,
+                                                   self._seed(text)), None)
+
+    async def _call(self, user: str, text: str | None = None, llm: BaseLLM | None = None, tag: str = "") -> Prediction:
+        llm = llm or self.llm
+        cfg = llm.cfg
+        key = LLMCache.make_key(cfg, SYSTEM_PROMPT, user, tag)
+        raw = self.cache.get(key) if llm.cacheable else None
         from_cache = raw is not None
         usage = prob = None
         if from_cache:
             prob = self.cache.probs.get(key)
             self.stats["cache_hits"] += 1
-            if self.llm.billable:
+            if llm.billable:
                 tin, tout = self.cache.usage.get(key) or (estimate_tokens(SYSTEM_PROMPT + user), estimate_tokens(raw))
                 self.stats["saved"] += cost_of(cfg, tin, tout)
         else:
             async with self.limiter.slot(), self.sem:
                 self.stats["calls"] += 1
                 try:
-                    reply = await self.llm.complete(SYSTEM_PROMPT, user)
+                    reply = await llm.complete(SYSTEM_PROMPT, user)
                 except LLMError as e:
                     self.stats["errors"] += 1
                     return Prediction(self.name, None, error=str(e))
             raw = reply.text
             prob = label_prob(reply.tokens)
-            if self.llm.billable:
+            if llm.billable:
                 if reply.in_tokens is None or reply.out_tokens is None:
                     self.stats["estimated_calls"] += 1
                 tin = reply.in_tokens if reply.in_tokens is not None else estimate_tokens(SYSTEM_PROMPT + user)
@@ -273,11 +364,12 @@ class Classifier:
                 self.stats["cost"] += cost_of(cfg, *usage)
 
         try:
-            label, conf, reason = parse_output(raw, self.task.label_names)
+            label, conf, reason, evidence = parse_reply(raw, self.task.label_names, self.task)
         except ParseError as e:
             self.stats["errors"] += 1
             return Prediction(self.name, None, error=f"解析失败: {e}", raw=raw)
 
-        if self.llm.cacheable and not from_cache:
+        if llm.cacheable and not from_cache:
             self.cache.put(key, raw, usage, prob)
-        return Prediction(self.name, label, conf, reason, raw=raw, prob=prob)
+        ev_ok = evidence_in_text(evidence, text) if self.evidence and text is not None else None
+        return Prediction(self.name, label, conf, reason, raw=raw, prob=prob, evidence=evidence, evidence_ok=ev_ok)

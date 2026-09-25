@@ -22,7 +22,9 @@ import yaml
 from crosscheck.config import (
     DISAGREEMENT_ACTIONS,
     PROVIDERS,
+    REVIEW_VIEWS,
     ModelConfig,
+    split_labels,
     base_of,
     config_from_dict,
     load_dotenv,
@@ -35,6 +37,15 @@ from crosscheck.dialogue import build_items as build_dialogue_items, cited_index
 from crosscheck.documents import aggregate_documents, filter_paragraphs, split_document
 from crosscheck.drafting import draft_from_document, draft_from_examples, drafting_models, read_document, review_criteria
 from crosscheck.monitor import drift_alerts, label_share, suggest_rules
+from crosscheck.calibrate import (
+    calibration_report,
+    compare_aggregators,
+    crossfit_posteriors,
+    fit_calibration,
+    pick_threshold,
+    posterior_curve,
+    simulate_thresholds,
+)
 from crosscheck.evaluate import evaluate
 from crosscheck.validation import ci_halfwidth, sample_rows, split_dev_test
 from crosscheck.history import (
@@ -75,7 +86,7 @@ from crosscheck.review import (
 st.set_page_config(page_title="多模型互检分类平台", page_icon="🔍", layout="wide")
 load_dotenv()
 
-ROLE_VOTER, ROLE_ARBITER = "投票", "仲裁"
+ROLE_VOTER, ROLE_ARBITER, ROLE_JURY = "投票", "仲裁", "评审团"
 MODEL_COLS = {
     "enabled": "启用", "role": "角色", "name": "名称", "provider": "接口类型", "base_url": "接口地址",
     "model": "模型", "api_key_env": "Key 环境变量", "weight": "权重", "temperature": "温度",
@@ -94,6 +105,7 @@ def models_to_df(raw: dict) -> pd.DataFrame:
     entries = [(m, ROLE_VOTER) for m in raw.get("models") or []]
     if raw.get("arbiter"):
         entries.append((raw["arbiter"], ROLE_ARBITER))
+    entries += [(m, ROLE_JURY) for m in raw.get("jury") or []]
     rows = []
     for m, role in entries:
         d = {**MODEL_DEFAULTS, **m, "role": role}
@@ -108,9 +120,10 @@ def _clean(v, default):
     return v
 
 
-def df_to_models(df: pd.DataFrame, raw: dict) -> tuple[list[dict], dict | None]:
-    originals = {m["name"]: m for m in (raw.get("models") or []) + ([raw["arbiter"]] if raw.get("arbiter") else [])}
-    models, arbiters = [], []
+def df_to_models(df: pd.DataFrame, raw: dict) -> tuple[list[dict], dict | None, list[dict]]:
+    originals = {m["name"]: m for m in (raw.get("models") or []) + ([raw["arbiter"]] if raw.get("arbiter") else [])
+                 + (raw.get("jury") or [])}
+    models, arbiters, jury = [], [], []
     for _, row in df.iterrows():
         name = str(_clean(row[MODEL_COLS["name"]], "")).strip()
         if not name:
@@ -129,10 +142,11 @@ def df_to_models(df: pd.DataFrame, raw: dict) -> tuple[list[dict], dict | None]:
         except json.JSONDecodeError as e:
             raise ValueError(f"模型 {name} 的额外参数不是合法 JSON：{e}") from e
         m = {k: v for k, v in m.items() if k in ESSENTIAL or v != MODEL_DEFAULTS.get(k)}
-        (arbiters if row[MODEL_COLS["role"]] == ROLE_ARBITER else models).append(m)
+        role = row[MODEL_COLS["role"]]
+        (arbiters if role == ROLE_ARBITER else jury if role == ROLE_JURY else models).append(m)
     if len(arbiters) > 1:
         raise ValueError("最多只能设置一个仲裁模型")
-    return models, (arbiters[0] if arbiters else None)
+    return models, (arbiters[0] if arbiters else None), jury
 
 
 def labels_to_df(raw: dict) -> pd.DataFrame:
@@ -202,7 +216,8 @@ def task_title(path: str) -> str:
 
 # ---------------------------------------------------------------- 运行
 async def ping_all(config) -> list[dict]:
-    targets = [(m, ROLE_VOTER) for m in config.models] + ([(config.arbiter, ROLE_ARBITER)] if config.arbiter else [])
+    targets = ([(m, ROLE_VOTER) for m in config.models] + ([(config.arbiter, ROLE_ARBITER)] if config.arbiter else [])
+               + [(j, ROLE_JURY) for j in config.jury])
     async with httpx.AsyncClient(timeout=config.pipeline.timeout) as http:
         async def one(m, role):
             start = time.monotonic()
@@ -214,6 +229,74 @@ async def ping_all(config) -> list[dict]:
                 return {"名称": m.name, "角色": role, "模型": m.model, "结果": "❌ 失败",
                         "耗时(秒)": round(time.monotonic() - start, 1), "回复 / 错误": str(e)[:200]}
         return list(await asyncio.gather(*(one(m, r) for m, r in targets)))
+
+
+CALIB_DIR = Path("output/calibration")
+NO_CALIB = "（不使用）"
+
+
+def calibration_files() -> list[str]:
+    return sorted(p.as_posix() for p in CALIB_DIR.glob("*.json")) if CALIB_DIR.exists() else []
+
+
+def advanced_settings(raw: dict, p: dict, action: str, ver: int) -> dict:
+    """运行页的高级选项（v0.4 聚合与校准、v0.5 协作模式），返回要写入 pipeline 的字段。"""
+    st.markdown("**聚合与校准**")
+    files = calibration_files()
+    cur = p.get("calibration") or ""
+    opts = [NO_CALIB] + files + ([cur] if cur and cur not in files else [])
+    c1, c2 = st.columns([2, 1])
+    calib = c1.selectbox("校准文件", opts, index=opts.index(cur) if cur else 0, key=f"calib_{ver}",
+                         help="在“⑥ 历史与对比”页用带标准答案的运行生成。使用后：投票改为按类别加权的后验概率，"
+                              "级联门槛按校准后的置信度（≈ 真实正确率）判断")
+    calib = "" if calib == NO_CALIB else calib
+    min_post = c2.slider("后验概率门槛", 0.0, 1.0, float(p.get("min_posterior", 0.0)), 0.01, key=f"min_post_{ver}",
+                         disabled=not calib,
+                         help="0 = 不启用。> 0 时后验概率 ≥ 门槛的样本直接采纳（即使首轮有分歧），"
+                              "首轮一致但后验低于门槛的样本不直接采纳，交给仲裁 / 人工。门槛可以在“⑥ 历史与对比”页按目标准确率自动搜索")
+    if raw.get("task", {}).get("multi_label") and calib:
+        st.warning("多标签任务不支持校准文件，运行时会报错。")
+    c1, c2 = st.columns(2)
+    samples = c1.number_input("Self-Consistency 采样次数", 1, 10, int(p.get("samples", 1)), key=f"samples_{ver}",
+                              help="每个大模型首轮回答几次（第 1 次用模型自身温度，其余用下方温度），取多数答案，"
+                                   "答案一致的比例作为置信度。费用约为原来的 N 倍；本地小模型不采样")
+    s_temp = c2.slider("采样温度", 0.1, 1.5, float(p.get("sample_temperature", 0.7)), 0.1, key=f"s_temp_{ver}",
+                       disabled=samples <= 1)
+    llm_voters = [m["name"] for m in raw.get("models") or [] if m.get("enabled", True) and m.get("provider") != "local"]
+    s_models = st.multiselect("只对这些模型采样（留空 = 全部大模型）", llm_voters,
+                              default=[n for n in p.get("sample_models") or [] if n in llm_voters],
+                              key=f"s_models_{ver}", disabled=samples <= 1,
+                              help="例如只对便宜的模型多次采样，贵的模型仍只回答一次")
+    st.markdown("**协作模式**")
+    c1, c2 = st.columns(2)
+    evidence = c1.toggle("证据引用", value=bool(p.get("require_evidence")), key=f"evidence_{ver}",
+                         help="要求模型逐字摘抄原文作为证据。摘抄的内容在原文中找不到时，该判断在投票中降权。"
+                              "开启后提示词变化，已有缓存不再命中")
+    penalty = c2.slider("无证据判断的权重系数", 0.0, 1.0, float(p.get("evidence_penalty", 0.5)), 0.05,
+                        key=f"penalty_{ver}", disabled=not evidence)
+    review_on = action == "review"
+    c1, c2, c3 = st.columns(3)
+    rounds = c1.number_input("复核最多几轮（多轮辩论）", 1, 5, int(p.get("debate_rounds", 1)), key=f"rounds_{ver}",
+                             disabled=not review_on, help="> 1 时每轮都看到其他模型上一轮的意见，全部一致就提前结束")
+    views = list(REVIEW_VIEWS)
+    view = c2.selectbox("复核时看到的他人意见", views, index=views.index(p.get("review_view", "full")),
+                        format_func=REVIEW_VIEWS.get, key=f"view_{ver}", disabled=not review_on,
+                        help="只看理由：隐藏他人的结论（理由中的类别名也会遮盖），减少“跟着多数走”；只看标签：不给理由，逼复核者自己找依据")
+    devil = c3.toggle("魔鬼代言人", value=bool(p.get("devil_advocate")), key=f"devil_{ver}", disabled=not review_on,
+                      help="复核前先让仲裁模型（没有时用第一个大模型）专门反驳当前多数意见，反方意见一起交给复核者，对抗从众")
+    jury = [m["name"] for m in raw.get("jury") or [] if m.get("enabled", True)]
+    jury_th = float(p.get("jury_threshold", 0.6))
+    if jury:
+        jury_th = st.slider(f"评审团采纳门槛（成员：{' / '.join(jury)}）", 0.0, 1.0, jury_th, 0.05, key=f"jury_th_{ver}",
+                            disabled=action == "human", help="同意人数 / 评审团人数 ≥ 该值才采纳。评审团代替仲裁模型")
+    else:
+        st.caption("评审团：在“① 模型配置”页把几个模型的角色设为“评审团”即可启用，分歧时代替单个仲裁模型。")
+    if not review_on:
+        st.caption("多轮辩论、对照式复核、魔鬼代言人只在“首轮出现分歧时 = 交叉复核”时生效。")
+    return {"calibration": calib, "min_posterior": min_post if calib else 0.0, "samples": int(samples),
+            "sample_temperature": s_temp, "sample_models": s_models if samples > 1 else [],
+            "require_evidence": evidence, "evidence_penalty": penalty,
+            "debate_rounds": int(rounds), "review_view": view, "devil_advocate": devil, "jury_threshold": jury_th}
 
 
 async def run_pipeline(config, items, on_progress):
@@ -339,6 +422,114 @@ def _split_doc_cached(name: str, data: bytes, min_chars: int):
     return split_document(name, data, min_chars)
 
 
+@st.cache_data(show_spinner=False)
+def _calibration_analysis(path: str, stamp: int, labels: tuple[str, ...]) -> dict:
+    recs = load_run(path)
+    lab = list(labels)
+    return {
+        "compare": compare_aggregators(recs, lab),
+        "calib": calibration_report(recs, lab),
+        "curve": posterior_curve(crossfit_posteriors(recs, lab)),
+        "sim": simulate_thresholds(recs, lab),
+    }
+
+
+def calibration_section(entries: list[dict], run_name: dict[str, str]) -> None:
+    """⑥ 页：用带标准答案的运行做校准、比较聚合方式、按目标准确率搜索阈值。"""
+    st.divider()
+    st.subheader("校准与阈值")
+    st.caption("选一次带标准答案的运行（评估运行），只用已有的模型回答，不调用模型。需要标准答案的方法都用 5 折交叉验证，"
+               "数字不会因为“拿答案拟合再拿答案评估”而虚高。")
+    gold_entries = [e for e in entries if e["summary"]["gold_n"]]
+    if not gold_entries:
+        st.caption("还没有带标准答案的运行。在“④ 运行与结果”页选择标签列运行一次即可。")
+        return
+    path = st.selectbox("用哪次运行校准", [e["path"] for e in gold_entries], format_func=run_name.get, key="calib_run")
+    e = next(x for x in gold_entries if x["path"] == path)
+    task_snap = run_criteria(e["meta"]) or raw.get("task") or {}
+    if task_snap.get("multi_label"):
+        st.caption("多标签任务暂不支持校准（按类别混淆矩阵只适用于单标签）。")
+        return
+    labels = [lab["name"] for lab in task_snap.get("labels") or []]
+    labels = labels or sorted({r["gold"] for r in e["records"] if r.get("gold")})
+    res = _calibration_analysis(path, Path(path).stat().st_mtime_ns, tuple(labels))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**聚合方式对比**")
+        cmp_df = pd.DataFrame(res["compare"]["rows"])
+        if not cmp_df.empty:
+            cmp_df["需要标准答案"] = cmp_df["需要标准答案"].map({True: "是（交叉验证）", False: ""})
+            st.dataframe(cmp_df, hide_index=True, width="stretch",
+                         column_config={"准确率": st.column_config.NumberColumn(format="percent")})
+            st.caption(f"当前数据上最好的聚合方式：**{res['compare']['best']}**。150 条左右的样本上，1~2 个百分点的差距通常只是随机波动。"
+                       "Dawid-Skene / Wawa / MACE / GLAD 不需要标准答案，可以在没有金标准的数据上用。")
+    with c2:
+        st.markdown("**置信度校准**")
+        cal_df = pd.DataFrame(res["calib"])
+        if not cal_df.empty:
+            st.dataframe(cal_df, hide_index=True, width="stretch",
+                         column_config={"准确率": st.column_config.NumberColumn(format="percent"),
+                                        "平均置信度": st.column_config.NumberColumn(format="percent"),
+                                        "校准前 ECE": st.column_config.NumberColumn(format="%.3f"),
+                                        "校准后 ECE": st.column_config.NumberColumn(format="%.3f")})
+            st.caption("ECE：模型说“80% 把握”时实际正确率与 80% 平均差多少，越小越可信。"
+                       "模型自报的置信度普遍比实际准确率高 10~30 个百分点，校准后一般降到 5 个百分点左右。")
+
+    st.markdown("**按目标准确率搜索阈值**")
+    target = st.slider("自动采纳部分的目标准确率", 0.70, 0.99, 0.95, 0.01, key="calib_target")
+    curve = res["curve"]
+    pick = pick_threshold(curve, target)
+    first = [r for r in e["records"] if r["status"] == "consensus"]
+    first_acc = sum(r["label"] == r.get("gold") for r in first) / len(first) if first else None
+    c = st.columns(3)
+    if pick:
+        c[0].metric("推荐后验门槛", f"{pick['门槛']:.2f}")
+        c[1].metric("自动采纳", f"{pick['自动采纳比例'] * 100:.1f}%", f"{pick['自动采纳条数']} 条", delta_color="off")
+        c[2].metric("自动采纳准确率", f"{pick['自动采纳准确率'] * 100:.1f}%")
+    else:
+        best = max((r for r in curve if r["自动采纳准确率"] is not None), key=lambda r: r["自动采纳准确率"], default=None)
+        st.warning("按后验概率无法达到这个目标准确率" + (f"：最高 {best['自动采纳准确率'] * 100:.1f}%（自动采纳 {best['自动采纳比例'] * 100:.1f}%）。"
+                                           if best else "。") + "可以降低目标，或先改进分类标准 / 换更强的模型。")
+    if first_acc is not None:
+        st.caption(f"对照：这次运行“首轮一致通过”自动采纳了 {len(first) / len(e['records']) * 100:.1f}%，准确率 {first_acc * 100:.1f}%。")
+    chart = pd.DataFrame([{"门槛": r["门槛"], "自动采纳比例 %": r["自动采纳比例"] * 100,
+                           "自动采纳准确率 %": (r["自动采纳准确率"] or 0) * 100} for r in curve]).set_index("门槛")
+    st.line_chart(chart)
+    sim_pick = pick_threshold(res["sim"], target)
+    has_sim = sim_pick and (sim_pick["accept_threshold"] is not None or sim_pick["arbiter_threshold"] is not None)
+    if has_sim:
+        st.caption(f"按这次运行已有的复核 / 仲裁记录模拟：accept_threshold = {sim_pick['accept_threshold']}、"
+                   f"arbiter_threshold = {sim_pick['arbiter_threshold']} 时自动采纳 {sim_pick['自动采纳比例'] * 100:.1f}%，"
+                   f"准确率 {sim_pick['自动采纳准确率'] * 100:.1f}%（没有仲裁记录的样本按转人工计算，偏保守）。")
+
+    now_labels = {lab["name"] for lab in (raw.get("task") or {}).get("labels") or []}
+    now_models = {m["name"] for m in raw.get("models") or []}
+    run_models = {p["model"] for r in e["records"][:20] for p in r["round1"]}
+    if set(labels) != now_labels:
+        st.warning("这次运行的类别与当前任务不同，生成的校准文件不能用于当前任务。")
+    elif run_models - now_models or now_models - run_models:
+        st.caption(f"提示：校准用的模型（{' / '.join(sorted(run_models))}）与当前配置（{' / '.join(sorted(now_models))}）不完全相同，"
+                   "不在校准文件里的模型不参与后验计算。")
+    c1, c2 = st.columns([1, 2])
+    use_post = c1.toggle("同时设置后验门槛", value=bool(pick), disabled=not pick, key="calib_use_post")
+    if c2.button("💾 保存校准文件并用于当前配置", disabled=set(labels) != now_labels, width="stretch"):
+        cal = fit_calibration(e["records"], labels, source=path)
+        name = f"{(raw.get('task') or {}).get('name') or 'task'}_{Path(path).parent.name}"
+        safe = re.sub(r"[^0-9A-Za-z_\u4e00-\u9fff-]+", "_", name)
+        out = cal.save(CALIB_DIR / f"{safe}.json")
+        pc = raw.setdefault("pipeline", {})
+        pc["calibration"] = out.as_posix()
+        pc["min_posterior"] = float(pick["门槛"]) if use_post and pick else 0.0
+        if has_sim and sim_pick["accept_threshold"] is not None:
+            pc["accept_threshold"] = float(sim_pick["accept_threshold"])
+        if has_sim and sim_pick["arbiter_threshold"] is not None:
+            pc["arbiter_threshold"] = float(sim_pick["arbiter_threshold"])
+        st.session_state.ver = st.session_state.get("ver", 0) + 1
+        st.toast(f"已保存 {out.as_posix()} 并写入当前配置（运行页“高级”中可查看），长期使用请在侧边栏保存配置")
+        st.rerun()
+
+
 def pct(v) -> float | None:
     return None if v is None else v * 100
 
@@ -399,12 +590,14 @@ tab_models, tab_task, tab_train, tab_run, tab_review, tab_history = st.tabs(
 with tab_models:
     st.subheader("参与互检的模型")
     st.caption("建议 3 个来自不同厂商的“投票”模型 + 1 个“仲裁”模型。接口类型：openai = 任何 OpenAI 兼容接口（DeepSeek / 百炼 / Kimi / 大部分中转站）；"
-               "local = 用训练数据训练的本地小模型，在“③ 训练数据”页一键添加。")
+               "local = 用训练数据训练的本地小模型，在“③ 训练数据”页一键添加。"
+               "角色选“评审团”的模型会在分歧时各自仲裁、按人数投票，代替单个仲裁模型（可以选几个便宜的小模型）。")
     edited_models = st.data_editor(
         st.session_state.models_df, key=f"models_editor_{ver}", num_rows="dynamic", width="stretch",
         column_config={
             MODEL_COLS["enabled"]: st.column_config.CheckboxColumn(default=True),
-            MODEL_COLS["role"]: st.column_config.SelectboxColumn(options=[ROLE_VOTER, ROLE_ARBITER], default=ROLE_VOTER, required=True),
+            MODEL_COLS["role"]: st.column_config.SelectboxColumn(options=[ROLE_VOTER, ROLE_ARBITER, ROLE_JURY],
+                                                                 default=ROLE_VOTER, required=True),
             MODEL_COLS["provider"]: st.column_config.SelectboxColumn(options=list(PROVIDERS), default="openai", required=True),
             MODEL_COLS["weight"]: st.column_config.NumberColumn(min_value=0.01, step=0.1, default=1.0),
             MODEL_COLS["temperature"]: st.column_config.NumberColumn(min_value=0.0, max_value=2.0, step=0.1, default=0.0),
@@ -421,7 +614,11 @@ with tab_models:
         },
     )
     try:
-        raw["models"], raw["arbiter"] = df_to_models(edited_models, raw)
+        raw["models"], raw["arbiter"], jury_rows = df_to_models(edited_models, raw)
+        if jury_rows:
+            raw["jury"] = jury_rows
+        else:
+            raw.pop("jury", None)
     except ValueError as e:
         config_error = str(e)
         st.error(config_error)
@@ -541,6 +738,18 @@ with tab_task:
     st.caption("定义越清晰、正反例越贴近真实数据，模型之间的分歧越少。")
     edited_labels = st.data_editor(st.session_state.labels_df, key=f"labels_editor_{ver}", num_rows="dynamic", width="stretch")
     task["labels"] = df_to_labels(edited_labels)
+    c1, c2, c3 = st.columns([1, 1, 2])
+    multi = c1.toggle("多标签", value=bool(task.get("multi_label")), key=f"multi_{ver}",
+                      help="一条文本可以同时属于多个类别。结果写成“类别A|类别B”；金标准也用 | 或顿号、逗号分隔")
+    max_labels = c2.number_input("每条最多几个标签", min_value=1, max_value=10, value=int(task.get("max_labels", 3)),
+                                 key=f"max_labels_{ver}", disabled=not multi)
+    hier = c3.toggle("层级分类（类别写成“一级类/二级类”）", value=bool(task.get("hierarchical")), key=f"hier_{ver}",
+                     help="例如“投诉/物流”“投诉/售后”“建议/功能”。提示词按一级类分组，二级类有分歧但一级类一致时会在备注中说明，评估时额外统计一级类准确率")
+    for key, val, on in (("multi_label", True, multi), ("max_labels", int(max_labels), multi), ("hierarchical", True, hier)):
+        if on:  # 默认值不写入配置，避免改变已有任务的标准版本号
+            task[key] = val
+        else:
+            task.pop(key, None)
     st.subheader("边界规则")
     rules_text = st.text_area("每行一条：写清楚容易混淆的情况该怎么判", value="\n".join(task.get("rules") or []), height=140, key=f"rules_{ver}")
     task["rules"] = [r.strip() for r in rules_text.splitlines() if r.strip()]
@@ -989,12 +1198,18 @@ with tab_run:
                             key=f"shuffle_{ver}",
                             help="每个模型、每条文本看到的类别顺序不同（按哈希固定，重跑仍命中缓存），消除模型对靠前选项的偏好。"
                                  "开启后提示词变化，已有缓存不再命中")
+        with st.expander("🧪 高级：校准、Self-Consistency、证据引用、辩论与评审团", expanded=False):
+            adv = advanced_settings(raw, p, action, ver)
         run_note = st.text_input("本次运行备注（可选，显示在“⑥ 历史与对比”页）", key="run_note",
                                  placeholder="例如：换了千问新版本 / 加了 3 条边界规则")
 
         sub = df if not limit else df.head(int(limit))
         items, bad = [], set()
         allowed = {lab["name"] for lab in raw["task"]["labels"]}
+        try:
+            task_obj = config_from_dict(raw, mock=True).task
+        except ValueError:
+            task_obj = None
         for n, row in enumerate(sub.itertuples(index=False), 1):
             r = dict(zip(cols, row))
             text = str(_clean(r[text_col], "")).strip()
@@ -1002,9 +1217,11 @@ with tab_run:
                 continue
             item = {"id": str(r[id_col]) if id_col != "（自动编号）" else str(n), "text": text}
             if label_col != "（无，只做分类）":
-                item["label"] = str(_clean(r[label_col], "")).strip()
-                if item["label"] not in allowed:
-                    bad.add(item["label"])
+                value = str(_clean(r[label_col], "")).strip()
+                norm = task_obj.normalize_gold(value) if task_obj else (value if value in allowed else None)
+                if norm is None:
+                    bad.add(value)
+                item["label"] = norm or value
             items.append(item)
         if bad:
             st.error(f"标签列中有配置里不存在的类别：{sorted(bad)}。请在“分类任务”页添加这些类别，或检查标签列是否选对。")
@@ -1028,7 +1245,7 @@ with tab_run:
         run_raw = copy.deepcopy(raw)
         run_raw["pipeline"] = {**p, "disagreement_action": action, "accept_threshold": accept,
                                "arbiter_threshold": arb_th, "concurrency": int(concurrency), "cascade": cascade,
-                               "cascade_min_confidence": casc_th if cascade else 0.0}
+                               "cascade_min_confidence": casc_th if cascade else 0.0, **adv}
         run_raw["task"] = {**run_raw.get("task", {}), "shuffle_labels": shuffle}
 
         c1, c2, c3 = st.columns([1, 1, 2])
@@ -1079,7 +1296,8 @@ with tab_run:
             if gold:
                 from crosscheck.report import build_report
                 weights = {m.name: m.weight for m in config.models}
-                rep = evaluate(results, gold, model_names, config.task.label_names, weights)
+                rep = evaluate(results, gold, model_names, config.task.label_names, weights,
+                               config.task.multi_label, config.task.hierarchical)
                 paths["html"] = build_report(rep, out)
             st.session_state.last = {"results": results, "stats": stats, "elapsed": elapsed, "rep": rep,
                                      "paths": paths, "out": out, "model_names": model_names, "extra": extra_payload}
@@ -1502,6 +1720,8 @@ with tab_history:
             elif advice.get("n", 0) >= 3:
                 st.caption("模型没有给出可直接追加的规则。")
 
+        calibration_section(entries, run_name)
+
 # ---------------- ⑤ 人工审核
 with tab_review:
     runs = [p.as_posix() for p in list_runs()]
@@ -1520,6 +1740,7 @@ with tab_review:
     model_names = run_model_names(records)
     seen = [lab for r in records for lab in [r["label"]] + [p.get("label") for p in r["round1"]] if lab]
     labels = list(dict.fromkeys([lab["name"] for lab in raw["task"]["labels"]] + seen))
+    multi_task = bool(raw["task"].get("multi_label")) or any("|" in lab for lab in seen)
 
     c1, c2, c3 = st.columns([2, 1, 1])
     scope = c1.selectbox("审核范围", list(SCOPES), format_func=SCOPES.get,
@@ -1553,23 +1774,40 @@ with tab_review:
         ops = []
         for p in rec["round1"]:
             q = r2.get(p["model"], {})
-            ops.append({
+            row = {
                 "模型": p["model"],
                 "首轮": p.get("label") or "失败",
                 "置信度": p.get("confidence") if p.get("label") else None,
                 "首轮理由": p.get("reason") or p.get("error") or "",
                 "复核后": q.get("label") or ("—" if not q else "失败"),
                 "复核理由": q.get("reason", ""),
-            })
+            }
+            if p.get("samples"):
+                row["采样"] = " / ".join(p["samples"])
+            if p.get("evidence_ok") is not None:
+                row["引用原文"] = ("✅ " if p["evidence_ok"] else "❌ ") + (p.get("evidence") or "（未引用）")
+            ops.append(row)
         arb = rec.get("arbiter")
+        for j in rec.get("jury") or []:
+            ops.append({"模型": f"{j['model']}（评审团）", "首轮": j.get("label") or "失败",
+                        "置信度": j.get("confidence") if j.get("label") else None,
+                        "首轮理由": j.get("reason") or j.get("error") or "", "复核后": "", "复核理由": ""})
         if arb:
-            ops.append({"模型": f"{arb['model']}（仲裁）", "首轮": arb.get("label") or "失败",
+            ops.append({"模型": arb["model"] if arb["model"] == "评审团" else f"{arb['model']}（仲裁）",
+                        "首轮": arb.get("label") or "失败",
                         "置信度": arb.get("confidence") if arb.get("label") else None,
                         "首轮理由": arb.get("reason") or arb.get("error") or "", "复核后": "", "复核理由": ""})
         st.dataframe(pd.DataFrame(ops), hide_index=True, width="stretch",
                      column_config={"置信度": st.column_config.NumberColumn(format="%.2f"),
                                     "首轮理由": st.column_config.TextColumn(width="large"),
                                     "复核理由": st.column_config.TextColumn(width="large")})
+        if rec.get("devil"):
+            dv = rec["devil"]
+            st.caption(f"😈 魔鬼代言人主张「{dv.get('label') or '失败'}」：{dv.get('reason') or dv.get('error') or ''}")
+        if len(rec.get("debate") or []) > 1:
+            with st.expander(f"查看 {len(rec['debate'])} 轮辩论过程"):
+                st.dataframe(pd.DataFrame([{"轮次": i, **{p["model"]: p.get("label") or "失败" for p in rnd}}
+                                           for i, rnd in enumerate(rec["debate"], 1)]), hide_index=True, width="stretch")
 
         votes = round1_votes(rec)
         current = prev.get("label") or rec["label"]
@@ -1580,8 +1818,16 @@ with tab_review:
                 tags.append("模型建议")
             return f"{lab}（{'，'.join(tags)}）" if tags else lab
 
-        choice = st.radio("人工判定", labels, index=labels.index(current) if current in labels else 0,
-                          horizontal=True, format_func=fmt, key=f"rv_choice|{run_path}|{rec['id']}")
+        if multi_task:
+            base_labels = [lab["name"] for lab in raw["task"]["labels"]]
+            picked = st.multiselect("人工判定（可多选）", base_labels,
+                                    default=[x for x in split_labels(current) if x in base_labels],
+                                    key=f"rv_choice|{run_path}|{rec['id']}")
+            order = {n: i for i, n in enumerate(base_labels)}
+            choice = "|".join(sorted(picked, key=order.get)) or current
+        else:
+            choice = st.radio("人工判定", labels, index=labels.index(current) if current in labels else 0,
+                              horizontal=True, format_func=fmt, key=f"rv_choice|{run_path}|{rec['id']}")
         note = st.text_input("备注（可选）", value=prev.get("note", ""), key=f"rv_note|{run_path}|{rec['id']}")
         b1, b2, b3 = st.columns([1, 2, 1])
         if b1.button("⬅ 上一条", disabled=idx == 0, width="stretch"):
@@ -1608,7 +1854,8 @@ with tab_review:
         edited = st.data_editor(
             table, key=f"rv_table|{run_path}|{scope}|{only_pending}|{rv_ver}", hide_index=True, width="stretch",
             disabled=["ID", "文本", "模型建议", "各模型首轮"],
-            column_config={"人工标签": st.column_config.SelectboxColumn(options=labels),
+            column_config={"人工标签": (st.column_config.TextColumn(help="多个标签用 | 分隔") if multi_task
+                                        else st.column_config.SelectboxColumn(options=labels)),
                            "文本": st.column_config.TextColumn(width="large")},
         )
         by_id = {r["id"]: r for r in todo}

@@ -13,6 +13,11 @@ DISAGREEMENT_ACTIONS = {
     "arbiter": "跳过复核，直接交给仲裁模型",
     "human": "直接转人工审核",
 }
+REVIEW_VIEWS = {
+    "full": "看标签和理由",
+    "reasons": "只看理由（隐藏标签）",
+    "labels": "只看标签（隐藏理由）",
+}
 
 
 @dataclass
@@ -31,10 +36,46 @@ class TaskConfig:
     rules: list[str] = field(default_factory=list)
     # 选项顺序随机化：每个模型、每条文本看到的类别顺序不同（按哈希固定，缓存仍可复用），消除位置偏好
     shuffle_labels: bool = False
+    # 多标签：一条文本可以同时属于多个类别，结果写成按配置顺序排列、用 | 连接的字符串，例如“物流|售后”
+    multi_label: bool = False
+    max_labels: int = 3
+    # 层级分类：类别名写成“一级类/二级类”，提示词按一级类分组，评估时额外统计一级类准确率
+    hierarchical: bool = False
 
     @property
     def label_names(self) -> list[str]:
         return [lab.name for lab in self.labels]
+
+    def join(self, labels) -> str:
+        """多标签的规范写法：去重、按配置中的顺序排列。"""
+        order = {name: i for i, name in enumerate(self.label_names)}
+        return LABEL_SEP.join(sorted(set(labels), key=lambda x: order.get(x, len(order))))
+
+    def normalize_gold(self, value: str) -> str | None:
+        """人工标签是否合法；多标签任务接受 | ; ， 、 等分隔，返回规范写法。"""
+        value = str(value).strip()
+        names = set(self.label_names)
+        if not self.multi_label:
+            return value if value in names else None
+        parts = split_labels(value)
+        return self.join(parts) if parts and all(p in names for p in parts) else None
+
+
+LABEL_SEP = "|"
+LEVEL_SEP = "/"
+_SPLIT_CHARS = "|;；,，、"
+
+
+def split_labels(value: str | None) -> list[str]:
+    if not value:
+        return []
+    for ch in _SPLIT_CHARS[1:]:
+        value = value.replace(ch, LABEL_SEP)
+    return [x.strip() for x in value.split(LABEL_SEP) if x.strip()]
+
+
+def parent_of(label: str | None) -> str | None:
+    return label.split(LEVEL_SEP, 1)[0] if label else label
 
 
 @dataclass
@@ -85,6 +126,22 @@ class PipelineConfig:
     arbiter_threshold: float = 0.7
     timeout: float = 60
     max_retries: int = 3
+    # ---- 聚合与校准
+    # 金标准上拟合出的校准文件（每个模型的按类别混淆矩阵 + 置信度校准曲线），投票改用按类别加权的后验概率
+    calibration: str = ""
+    # > 0 时（需要校准文件）：后验概率 ≥ 该值的样本直接采纳，即使首轮有分歧；首轮一致但后验低于该值的也按分歧处理
+    min_posterior: float = 0.0
+    # Self-Consistency：每个大模型首轮回答的次数。第 1 次用模型自身温度，其余用 sample_temperature，多数答案为结果、占比为置信度
+    samples: int = 1
+    sample_temperature: float = 0.7
+    sample_models: list[str] = field(default_factory=list)  # 只对这些模型采样；留空表示全部大模型
+    # ---- 协作模式
+    debate_rounds: int = 1  # 复核的最多轮数：> 1 时每轮都看到其他模型上一轮的意见，全部一致就提前结束
+    devil_advocate: bool = False  # 复核前先请一个模型专门反驳当前多数意见，反方意见一起交给复核者
+    review_view: str = "full"  # 复核时看到的他人意见：full 标签+理由 / reasons 只看理由 / labels 只看标签
+    require_evidence: bool = False  # 要求逐字引用原文作为证据；引用不在原文中的判断在投票时乘以 evidence_penalty
+    evidence_penalty: float = 0.5
+    jury_threshold: float = 0.6  # 评审团模式：同意的评审员比例 ≥ 该值才采纳
 
 
 @dataclass
@@ -116,6 +173,8 @@ class Config:
     cache: CacheConfig
     mock_keywords: dict[str, list[str]]
     fewshot: FewShotConfig = field(default_factory=FewShotConfig)
+    # 评审团：分歧时由这些模型各自仲裁、按人数投票，代替单个仲裁模型
+    jury: list[ModelConfig] = field(default_factory=list)
 
 
 def load_dotenv(path: str | Path = ".env") -> None:
@@ -217,6 +276,9 @@ def config_from_dict(raw: dict, mock: bool = False) -> Config:
         labels=[_build(LabelDef, lab, f"task.labels[{i}]") for i, lab in enumerate(t.get("labels") or [])],
         rules=list(t.get("rules") or []),
         shuffle_labels=bool(t.get("shuffle_labels", False)),
+        multi_label=bool(t.get("multi_label", False)),
+        max_labels=int(t.get("max_labels", 3)),
+        hierarchical=bool(t.get("hierarchical", False)),
     )
 
     models = [_build(ModelConfig, m, f"models[{i}]") for i, m in enumerate(raw.get("models") or [])]
@@ -236,10 +298,11 @@ def config_from_dict(raw: dict, mock: bool = False) -> Config:
         cache=_build(CacheConfig, raw.get("cache") or {}, "cache"),
         mock_keywords=(raw.get("mock") or {}).get("keywords") or {},
         fewshot=_build(FewShotConfig, raw.get("fewshot") or {}, "fewshot"),
+        jury=[j for j in (_build(ModelConfig, m, f"jury[{i}]") for i, m in enumerate(raw.get("jury") or [])) if j.enabled],
     )
 
     if mock:
-        for m in config.models + ([config.arbiter] if config.arbiter else []):
+        for m in config.models + ([config.arbiter] if config.arbiter else []) + config.jury:
             if m.provider != "local":
                 m.provider = "mock"
 
@@ -260,7 +323,7 @@ def _validate(config: Config) -> None:
     if len(set(model_names)) != len(model_names):
         raise ValueError(f"模型 name 重复: {model_names}")
 
-    for m in config.models + ([config.arbiter] if config.arbiter else []):
+    for m in config.models + ([config.arbiter] if config.arbiter else []) + config.jury:
         if m.provider not in PROVIDERS:
             raise ValueError(f"模型 {m.name} 的 provider 必须是 {PROVIDERS} 之一，实际是 {m.provider!r}")
         if m.weight <= 0:
@@ -269,6 +332,20 @@ def _validate(config: Config) -> None:
             raise ValueError(f"本地模型 {m.name} 需要 train_path（或配置 fewshot.path）作为训练集")
     if config.arbiter and config.arbiter.provider == "local":
         raise ValueError("仲裁模型不能是本地模型（它无法阅读其他评审员的意见）")
+    if any(j.provider == "local" for j in config.jury):
+        raise ValueError("评审团成员不能是本地模型（它无法阅读其他评审员的意见）")
+    jury_names = [j.name for j in config.jury]
+    if len(set(jury_names)) != len(jury_names):
+        raise ValueError(f"评审团成员 name 重复: {jury_names}")
+
+    t = config.task
+    if t.multi_label and t.max_labels < 1:
+        raise ValueError("task.max_labels 至少为 1")
+    bad = [n for n in names if LABEL_SEP in n]
+    if bad:
+        raise ValueError(f"类别名称不能包含“{LABEL_SEP}”（多标签的分隔符）: {bad}")
+    if t.hierarchical and not any(LEVEL_SEP in n for n in names):
+        raise ValueError(f"层级分类需要把类别写成“一级类{LEVEL_SEP}二级类”，例如“投诉{LEVEL_SEP}物流”")
 
     unknown = set(config.mock_keywords) - set(names)
     if unknown:
@@ -289,3 +366,19 @@ def _validate(config: Config) -> None:
                              "否则级联没有意义")
     if not 0 <= pc.cascade_min_confidence <= 1:
         raise ValueError("pipeline.cascade_min_confidence 必须在 0 到 1 之间")
+    if not 1 <= pc.samples <= 10:
+        raise ValueError("pipeline.samples 必须在 1 到 10 之间")
+    missing = [n for n in pc.sample_models if n not in model_names]
+    if missing:
+        raise ValueError(f"pipeline.sample_models 中的模型不存在或未启用: {missing}")
+    if not 1 <= pc.debate_rounds <= 5:
+        raise ValueError("pipeline.debate_rounds 必须在 1 到 5 之间")
+    if pc.review_view not in REVIEW_VIEWS:
+        raise ValueError(f"pipeline.review_view 必须是 {list(REVIEW_VIEWS)} 之一")
+    for key in ("min_posterior", "evidence_penalty", "jury_threshold"):
+        if not 0 <= getattr(pc, key) <= 1:
+            raise ValueError(f"pipeline.{key} 必须在 0 到 1 之间")
+    if pc.min_posterior > 0 and not pc.calibration:
+        raise ValueError("pipeline.min_posterior 需要同时设置校准文件 pipeline.calibration")
+    if pc.calibration and t.multi_label:
+        raise ValueError("多标签任务暂不支持校准文件（按类别混淆矩阵只适用于单标签）")
