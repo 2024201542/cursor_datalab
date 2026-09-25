@@ -31,16 +31,21 @@ from crosscheck.config import (
     save_dotenv,
 )
 from crosscheck.criteria import changed_labels, criteria_hash, diff_criteria, list_versions, save_version, version_label
+from crosscheck.dialogue import build_items as build_dialogue_items, cited_indexes, group_turns, sessions_from_transcripts
+from crosscheck.documents import aggregate_documents, filter_paragraphs, split_document
 from crosscheck.drafting import draft_from_document, draft_from_examples, drafting_models, read_document, review_criteria
+from crosscheck.monitor import drift_alerts, label_share, suggest_rules
 from crosscheck.evaluate import evaluate
 from crosscheck.validation import ci_halfwidth, sample_rows, split_dev_test
 from crosscheck.history import (
     compare_items,
     delete_run,
     item_correct,
+    load_extra,
     load_meta,
     mcnemar,
     run_criteria,
+    save_extra,
     set_note,
     settings_text,
     summarize,
@@ -272,6 +277,66 @@ def read_gold_file(path: str) -> dict[str, str]:
     if not {"id", "label"} <= set(df.columns):
         raise ValueError("标签文件需要 id 和 label 两列")
     return dict(zip(df["id"].astype(str), df["label"].astype(str)))
+
+
+def _bubble_html(turns: list[dict], focus, reasons: list[str]) -> str:
+    cited = cited_indexes(turns, reasons)
+    lo, hi = 0, len(turns)
+    if focus is not None and len(turns) > 24:
+        lo, hi = max(0, focus - 8), min(len(turns), focus + 9)
+    parts = []
+    if lo:
+        parts.append(f"<div style='color:#888;font-size:12px'>已省略前面 {lo} 句</div>")
+    for i in range(lo, hi):
+        t = turns[i]
+        right = t["role"] in ("客服", "商家", "坐席")
+        bg = "#fef3c7" if i in cited else ("#e9f8ef" if right else "#e8f1ff")
+        border = "2px solid #2563eb" if i == focus else "1px solid transparent"
+        mark = " · 模型引用" if i in cited else ""
+        focus_mark = " · 待分类" if i == focus else ""
+        parts.append(
+            f"<div style='display:flex;justify-content:{'flex-end' if right else 'flex-start'};margin:4px 0'>"
+            f"<div style='max-width:78%;background:{bg};border:{border};border-radius:10px;padding:8px 12px'>"
+            f"<div style='font-size:12px;color:#64748b'>{html.escape(t['role'])}{focus_mark}{mark}</div>"
+            f"<div>{html.escape(t['text'])}</div></div></div>"
+        )
+    if hi < len(turns):
+        parts.append(f"<div style='color:#888;font-size:12px'>已省略后面 {len(turns) - hi} 句</div>")
+    return "\n".join(parts)
+
+
+def _reasons_of(rec: dict) -> list[str]:
+    out = [p.get("reason") or "" for p in rec.get("round1") or []]
+    out += [p.get("reason") or "" for p in rec.get("round2") or []]
+    if rec.get("arbiter"):
+        out.append(rec["arbiter"].get("reason") or "")
+    return out
+
+
+def show_item_body(rec: dict, extra: dict | None) -> None:
+    """审核时：对话显示气泡，长文档显示章节和相邻段落，其余显示原文。"""
+    info = ((extra or {}).get("items") or {}).get(rec["id"]) if extra else None
+    if extra and extra.get("kind") == "dialogue" and info:
+        st.markdown(_bubble_html(info["turns"], info.get("focus"), _reasons_of(rec)), unsafe_allow_html=True)
+        return
+    if extra and extra.get("kind") == "document" and info:
+        page = f"第 {info['page']} 页" if info.get("page") else "无分页"
+        st.caption(f"{info.get('doc', '')}　·　{info.get('chapter') or '（未识别章节）'}　·　{page}")
+        if info.get("prev"):
+            st.caption("上文：" + info["prev"])
+        st.markdown(f"<div style='font-size:1.15rem;padding:14px 18px;background:#fff7ed;border-left:4px solid #ea580c;"
+                    f"border-radius:8px;margin:6px 0'>{html.escape(info.get('text') or rec['text'])}</div>",
+                    unsafe_allow_html=True)
+        if info.get("next"):
+            st.caption("下文：" + info["next"])
+        return
+    st.markdown(f"<div style='font-size:1.25rem;padding:14px 18px;background:#f4f7fb;border-radius:8px;"
+                f"margin:6px 0 12px'>{html.escape(rec['text'])}</div>", unsafe_allow_html=True)
+
+
+@st.cache_data(show_spinner=False)
+def _split_doc_cached(name: str, data: bytes, min_chars: int):
+    return split_document(name, data, min_chars)
 
 
 def pct(v) -> float | None:
@@ -770,34 +835,125 @@ version_slot.caption(f"分类标准：{state}（共 {len(versions)} 个版本）
 
 # ---------------- ③ 运行与结果
 with tab_run:
-    source = st.radio("数据来源", ["上传文件", "项目 data 目录中的文件"], horizontal=True)
-    up = None
-    if source == "上传文件":
-        up = st.file_uploader("上传数据文件（CSV / Excel / JSONL）", type=["csv", "xlsx", "xls", "jsonl"])
-    else:
-        local = sorted(p.as_posix() for p in Path("data").glob("*") if p.suffix.lower() in (".csv", ".xlsx", ".xls", ".jsonl"))
-        picked_file = st.selectbox("选择文件", local) if local else None
-        if picked_file:
-            up = io.BytesIO(Path(picked_file).read_bytes())
-            up.name = picked_file
+    kind = st.radio("要分类的是", ["普通文本", "多轮对话", "长文档"], horizontal=True, key="run_kind")
+    extra_payload = None
+    input_name = "上传文件"
     df = None
-    if up is not None:
-        try:
-            df = read_upload(up)
-        except Exception as e:  # noqa: BLE001
-            st.error(f"读取失败：{e}")
+    if kind == "长文档":
+        st.caption("上传 PDF / Word / 网页 / TXT。先按章节和关键词缩小范围，一份年报往往有几百段，直接全部分类花费会比较高。扫描版 PDF 读不出文字。")
+        doc_files = st.file_uploader("上传文档（可多份）", type=["pdf", "docx", "html", "htm", "txt", "md"],
+                                     accept_multiple_files=True, key="doc_files")
+        local_docs = sorted(p.as_posix() for p in Path("data").glob("*")
+                            if p.suffix.lower() in (".pdf", ".docx", ".html", ".htm", ".txt", ".md"))
+        picked_docs = st.multiselect("或选择 data 目录中的文档", local_docs, key="doc_local") if local_docs else []
+        c1, c2 = st.columns(2)
+        min_chars = c1.number_input("短于多少字的段落丢掉", 10, 500, 40, 10, key="doc_min")
+        kw_text = c2.text_input("只保留包含这些词的段落（可选，逗号分隔）", key="doc_kw", placeholder="例如：气候, 排放, 风险")
+        blobs = [(f.name, f.getvalue()) for f in (doc_files or [])]
+        blobs += [(Path(p).name, Path(p).read_bytes()) for p in picked_docs]
+        paras, stats = [], []
+        for name, data in blobs:
+            try:
+                got, stat = _split_doc_cached(name, data, int(min_chars))
+                paras.extend(got)
+                stats.append(f"{name}：读到 {stat['blocks']} 块，留下 {stat['kept']} 段")
+            except (ValueError, OSError) as e:
+                st.error(f"{name}：{e}")
+        if paras:
+            chapters = list(dict.fromkeys(p["chapter"] for p in paras))
+            keep_ch = st.multiselect("只分类这些章节（不选 = 全部）", chapters, key="doc_chapters")
+            keywords = re.split(r"[,，、\s]+", kw_text)
+            paras = filter_paragraphs(paras, keywords, keep_ch or None)
+            df = pd.DataFrame([{"id": p["id"], "text": p["text"], "文档": p["doc"], "章节": p["chapter"], "页码": p["page"]}
+                               for p in paras])
+            extra_payload = {"kind": "document", "items": {p["id"]: p for p in paras}}
+            input_name = "、".join(n for n, _ in blobs)[:80]
+            st.caption("；".join(stats) + f"。筛选后 {len(paras)} 段。")
+            st.dataframe(df.head(8), width="stretch", hide_index=True)
+    else:
+        source = st.radio("数据来源", ["上传文件", "项目 data 目录中的文件"], horizontal=True)
+        up = None
+        if source == "上传文件":
+            up = st.file_uploader("上传数据文件（CSV / Excel / JSONL）", type=["csv", "xlsx", "xls", "jsonl"])
+        else:
+            local = sorted(p.as_posix() for p in Path("data").glob("*") if p.suffix.lower() in (".csv", ".xlsx", ".xls", ".jsonl"))
+            picked_file = st.selectbox("选择文件", local) if local else None
+            if picked_file:
+                up = io.BytesIO(Path(picked_file).read_bytes())
+                up.name = picked_file
+        if up is not None:
+            input_name = getattr(up, "name", input_name)
+            try:
+                df = read_upload(up)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"读取失败：{e}")
+        if df is not None and kind == "多轮对话":
+            st.caption(f"共 {len(df)} 行。先选格式，再整理成待分类文本。")
+            st.dataframe(df.head(), width="stretch", hide_index=True)
+            layout = st.radio("对话格式", ["一行一句（有会话编号和角色）", "一行一段完整对话"], horizontal=True, key="dlg_layout")
+            cols0 = [str(c) for c in df.columns]
+            df.columns = cols0
+            if layout.startswith("一行一句"):
+                c1, c2, c3, c4 = st.columns(4)
+                sess_c = c1.selectbox("会话编号列", cols0, index=cols0.index(guess_col(cols0, {"session_id", "会话", "conversation_id", "dialogue_id"}, cols0[0])), key="dlg_sess")
+                role_c = c2.selectbox("角色列", cols0, index=cols0.index(guess_col(cols0, {"role", "角色", "speaker"}, cols0[min(1, len(cols0) - 1)])), key="dlg_role")
+                text_c = c3.selectbox("内容列", cols0, index=cols0.index(guess_col(cols0, {"content", "text", "内容", "文本"}, cols0[0])), key="dlg_text")
+                time_opts = ["（无）"] + cols0
+                time_c = c4.selectbox("时间列", time_opts, index=time_opts.index(guess_col(time_opts, {"time", "时间"}, "（无）")), key="dlg_time")
+                label_opts0 = ["（无）"] + cols0
+                lab_c = st.selectbox("标签列（可选，整段一个标签，或每句一个标签）", label_opts0,
+                                     index=label_opts0.index(guess_col(label_opts0, {"label", "标签", "类别"}, "（无）")), key="dlg_lab")
+                sessions = group_turns(df.to_dict("records"), sess_c, role_c, text_c,
+                                       None if time_c == "（无）" else time_c, None if lab_c == "（无）" else lab_c)
+            else:
+                c1, c2, c3 = st.columns(3)
+                text_c = c1.selectbox("对话文本列", cols0, index=cols0.index(guess_col(cols0, {"text", "内容", "对话", "content"}, cols0[0])), key="dlg_text2")
+                id_opts0 = ["（自动编号）"] + cols0
+                id_c = c2.selectbox("会话编号列", id_opts0, index=id_opts0.index(guess_col(id_opts0, {"id", "编号", "session_id"}, "（自动编号）")), key="dlg_id2")
+                label_opts0 = ["（无）"] + cols0
+                lab_c = c3.selectbox("标签列", label_opts0, index=label_opts0.index(guess_col(label_opts0, {"label", "标签", "类别"}, "（无）")), key="dlg_lab2")
+                sessions = sessions_from_transcripts(df.to_dict("records"), None if id_c == "（自动编号）" else id_c, text_c,
+                                                     None if lab_c == "（无）" else lab_c)
+            roles = sorted({t["role"] for s in sessions for t in s["turns"]})
+            c1, c2, c3 = st.columns(3)
+            granularity = c1.radio("分类粒度", ["整段对话一个类别", "逐句分类"], horizontal=True, key="dlg_grain")
+            target = c2.multiselect("逐句时只分类这些角色（不选 = 每一句）", roles, key="dlg_roles",
+                                    disabled=not granularity.startswith("逐句"))
+            max_chars = c3.number_input("单条最多字数（超出则保留最近的内容）", 500, 20000, 4000, 500, key="dlg_chars")
+            built, extra_payload, warns = build_dialogue_items(
+                sessions, granularity="turn" if granularity.startswith("逐句") else "session",
+                target_roles=target, max_chars=int(max_chars))
+            for w in warns:
+                st.warning(w)
+            if not built:
+                st.error("没有整理出可分类的对话，请检查列是否选对。")
+                df = None
+            else:
+                if not all(it.get("label") for it in built):
+                    if any(it.get("label") for it in built):
+                        st.caption("只有部分对话有标签，本次不计算准确率。")
+                    built = [{k: v for k, v in it.items() if k != "label"} for it in built]
+                df = pd.DataFrame(built)
+                st.caption(f"整理成 {len(sessions)} 段对话、{len(built)} 条待分类文本。角色：{'、'.join(roles) or '无'}。"
+                           "审核页会按聊天气泡显示，并标出模型引用到的句子。")
+        elif df is not None:
+            st.caption(f"共 {len(df)} 行，预览前 5 行：")
+            st.dataframe(df.head(), width="stretch", hide_index=True)
     if df is not None:
-        st.caption(f"共 {len(df)} 行，预览前 5 行：")
-        st.dataframe(df.head(), width="stretch", hide_index=True)
         cols = [str(c) for c in df.columns]
         df.columns = cols
         guess = lambda names, fallback: next((c for c in cols if c.lower() in names), fallback)
-        c1, c2, c3 = st.columns(3)
-        text_col = c1.selectbox("文本列", cols, index=cols.index(guess({"text", "文本", "内容", "sentence"}, cols[0])))
-        id_opts = ["（自动编号）"] + cols
-        id_col = c2.selectbox("ID 列", id_opts, index=id_opts.index(guess({"id", "编号"}, "（自动编号）")))
-        label_opts = ["（无，只做分类）"] + cols
-        label_col = c3.selectbox("标签列（有则计算准确率）", label_opts, index=label_opts.index(guess({"label", "标签", "类别"}, "（无，只做分类）")))
+        if extra_payload:
+            text_col, id_col = "text", "id"
+            label_col = "label" if "label" in cols else "（无，只做分类）"
+            st.caption(f"待分类 {len(df)} 条。对话和长文档使用整理后的文本，列已自动对应。")
+        else:
+            c1, c2, c3 = st.columns(3)
+            text_col = c1.selectbox("文本列", cols, index=cols.index(guess({"text", "文本", "内容", "sentence"}, cols[0])))
+            id_opts = ["（自动编号）"] + cols
+            id_col = c2.selectbox("ID 列", id_opts, index=id_opts.index(guess({"id", "编号"}, "（自动编号）")))
+            label_opts = ["（无，只做分类）"] + cols
+            label_col = c3.selectbox("标签列（有则计算准确率）", label_opts, index=label_opts.index(guess({"label", "标签", "类别"}, "（无，只做分类）")))
 
         st.markdown("**运行设置**")
         p = raw.get("pipeline") or {}
@@ -915,7 +1071,8 @@ with tab_run:
             model_names = [m.name for m in config.models]
             gold = {it["id"]: it["label"] for it in items} if label_col != "（无，只做分类）" else None
             paths = write_results(results, out, model_names, gold=gold)
-            write_meta(paths["jsonl"], source="web", input_name=getattr(up, "name", "上传文件"), config=config,
+            save_extra(paths["jsonl"], extra_payload)
+            write_meta(paths["jsonl"], source="web", input_name=input_name, config=config,
                        raw=run_raw, stats=stats, elapsed=elapsed, n=len(items), has_gold=bool(gold),
                        config_path=st.session_state.get("cfg_path", "config.yaml"), note=run_note.strip())
             rep = None
@@ -925,7 +1082,7 @@ with tab_run:
                 rep = evaluate(results, gold, model_names, config.task.label_names, weights)
                 paths["html"] = build_report(rep, out)
             st.session_state.last = {"results": results, "stats": stats, "elapsed": elapsed, "rep": rep,
-                                     "paths": paths, "out": out, "model_names": model_names}
+                                     "paths": paths, "out": out, "model_names": model_names, "extra": extra_payload}
             bar.empty()
 
     last = st.session_state.get("last")
@@ -939,6 +1096,19 @@ with tab_run:
         cols_m[0].metric("总条数", n, f"用时 {last['elapsed']:.0f} 秒", delta_color="off")
         for c, (s, t) in zip(cols_m[1:], STATUS_TEXT.items()):
             c.metric(t, int(counts.get(s, 0)), f"{counts.get(s, 0) / n * 100:.0f}%", delta_color="off")
+
+        extra_now = last.get("extra") or load_extra(last["paths"]["jsonl"])
+        if extra_now and extra_now.get("kind") == "document":
+            agg_rows, tone = aggregate_documents(results, extra_now)
+            st.markdown("**按文档汇总**")
+            if tone:
+                st.caption(tone)
+            agg_df = pd.DataFrame(agg_rows)
+            share_cols = [c for c in agg_df.columns if c.endswith("占比") or c == "净语调"]
+            st.dataframe(agg_df, hide_index=True, width="stretch",
+                         column_config={c: st.column_config.NumberColumn(format="percent") if c.endswith("占比")
+                                        else st.column_config.NumberColumn(format="%+.2f") for c in share_cols})
+            st.download_button("⬇ 文档汇总 CSV", agg_df.to_csv(index=False).encode("utf-8-sig"), "document_summary.csv")
 
         if rep:
             strat = rep["strategies"]
@@ -1257,6 +1427,81 @@ with tab_history:
                                  hide_index=True, width="stretch", column_config={"文本": st.column_config.TextColumn(width="large")})
                     st.download_button("⬇ 下载对照表 CSV", ddf.to_csv(index=False).encode("utf-8-sig"), "compare.csv")
 
+        st.divider()
+        st.subheader("漂移监控")
+        st.caption("同一分类任务按时间排列。最近一次和前一次比：人工比例升高、准确率下降或标签分布明显变化时会提示。"
+                   "数据来源不同（比如一次是新闻、一次是股吧）也会触发，先看清“数据”列再下结论。")
+        task_names = sorted({e["meta"].get("task_name") or "（未记录任务）" for e in entries})
+        drift_task = st.selectbox("任务", task_names, key="drift_task")
+        drift_entries = [e for e in entries if (e["meta"].get("task_name") or "（未记录任务）") == drift_task]
+        drift_entries.sort(key=run_time)
+        drift_rows = []
+        for e in drift_entries:
+            s = e["summary"]
+            drift_rows.append({
+                "name": run_name[e["path"]],
+                "time": run_time(e),
+                "input": e["meta"].get("input") or "",
+                "human_rate": 1 - s["auto_rate"],
+                "auto_rate": s["auto_rate"],
+                "acc": s.get("acc"),
+                "labels": label_share(e["records"]),
+                "criteria_hash": e["meta"].get("criteria_hash") or "",
+            })
+        drift_df = pd.DataFrame([{
+            "时间": r["time"], "运行": r["name"], "数据": r["input"],
+            "需人工": r["human_rate"], "自动采纳": r["auto_rate"], "准确率": r["acc"], "标准": (r["criteria_hash"] or "")[:8],
+        } for r in drift_rows])
+        st.dataframe(drift_df, hide_index=True, width="stretch",
+                     column_config={"需人工": st.column_config.NumberColumn(format="percent"),
+                                    "自动采纳": st.column_config.NumberColumn(format="percent"),
+                                    "准确率": st.column_config.NumberColumn(format="percent")})
+        if len(drift_rows) >= 2:
+            chart = pd.DataFrame({"需人工 %": [r["human_rate"] * 100 for r in drift_rows],
+                                  "准确率 %": [(r["acc"] * 100 if r["acc"] is not None else None) for r in drift_rows]},
+                                 index=[r["time"][5:16] for r in drift_rows])
+            st.line_chart(chart)
+            for alert in drift_alerts(drift_rows):
+                st.warning(alert)
+        else:
+            st.caption("这个任务至少要有两次运行才能比较。")
+
+        st.subheader("规则建议")
+        st.caption("挑一次有分歧的运行，让模型归纳分歧集中在哪几条边界，并给出可以直接追加的规则。只分析，不会自动改标准。")
+        suggest_path = st.selectbox("分析哪次运行", [e["path"] for e in entries], format_func=lambda p: run_name[p], key="suggest_run")
+        suggest_models = []
+        try:
+            suggest_models = drafting_models(config_from_dict(raw))
+        except ValueError:
+            suggest_models = []
+        if not suggest_models:
+            st.caption("当前没有可用于分析的大模型（本地小模型和 mock 不行）。")
+        elif st.button("🪄 根据分歧建议规则", key="suggest_btn"):
+            task_now = run_criteria(by_path[suggest_path]["meta"]) or raw.get("task") or {}
+            model = next((m for m in suggest_models if m.name == "qwen"), suggest_models[0])
+            try:
+                with st.spinner("正在阅读分歧样本…"):
+                    advice = suggest_rules(config_from_dict(raw), model, task_now, by_path[suggest_path]["records"])
+                st.session_state.rule_advice = advice
+            except LLMError as e:
+                st.error(str(e))
+        advice = st.session_state.get("rule_advice")
+        if advice:
+            st.write(advice.get("summary") or "")
+            st.caption(f"分析了 {advice.get('n', 0)} 条分歧样本。")
+            if advice.get("patterns"):
+                st.dataframe(pd.DataFrame(advice["patterns"]), hide_index=True, width="stretch")
+            edits = [r for r in advice.get("rule_edits") or [] if r not in (raw.get("task") or {}).get("rules", [])]
+            if edits:
+                st.markdown("**建议追加的规则**\n" + "\n".join(f"- {r}" for r in edits))
+                if st.button("追加到当前分类标准（还要在侧边栏保存才会写入文件）", key="apply_rules"):
+                    raw["task"]["rules"] = list((raw.get("task") or {}).get("rules") or []) + edits
+                    st.session_state.ver = st.session_state.get("ver", 0) + 1
+                    st.toast("已追加到“② 分类任务”页，确认后在侧边栏保存")
+                    st.rerun()
+            elif advice.get("n", 0) >= 3:
+                st.caption("模型没有给出可直接追加的规则。")
+
 # ---------------- ⑤ 人工审核
 with tab_review:
     runs = [p.as_posix() for p in list_runs()]
@@ -1302,8 +1547,7 @@ with tab_review:
         if prev:
             head += f"　·　✅ 已审核为「{prev['label']}」"
         st.markdown(head)
-        st.markdown(f"<div style='font-size:1.25rem;padding:14px 18px;background:#f4f7fb;border-radius:8px;"
-                    f"margin:6px 0 12px'>{html.escape(rec['text'])}</div>", unsafe_allow_html=True)
+        show_item_body(rec, load_extra(run_path))
 
         r2 = {p["model"]: p for p in rec.get("round2") or []}
         ops = []

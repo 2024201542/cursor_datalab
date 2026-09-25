@@ -92,6 +92,29 @@ def set_note(run_path: str | Path, note: str) -> None:
     meta_path(run_path).write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def extra_path(run_path: str | Path) -> Path:
+    p = Path(run_path)
+    return p.with_name(f"{p.stem}_extra.json")
+
+
+def save_extra(run_path: str | Path, extra: dict | None) -> None:
+    """对话原文或文档段落位置，供审核页按气泡 / 上下文显示。没有则不写。"""
+    if not extra:
+        return
+    extra_path(run_path).write_text(json.dumps(extra, ensure_ascii=False), encoding="utf-8")
+
+
+def load_extra(run_path: str | Path) -> dict | None:
+    p = extra_path(run_path)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def delete_run(run_path: str | Path, web_root: str | Path = "output/web") -> None:
     """删除一次运行：网页运行删除整个时间戳目录；命令行运行只删除同名的结果文件，保留目录里的其他内容。"""
     p = Path(run_path)
@@ -99,7 +122,7 @@ def delete_run(run_path: str | Path, web_root: str | Path = "output/web") -> Non
         shutil.rmtree(p.parent, ignore_errors=True)
         return
     for f in (p, p.with_suffix(".csv"), p.with_name(f"{p.stem}_need_human.csv"),
-              meta_path(p), p.with_name(f"{p.stem}_reviews.json")):
+              meta_path(p), p.with_name(f"{p.stem}_reviews.json"), extra_path(p)):
         f.unlink(missing_ok=True)
 
 
