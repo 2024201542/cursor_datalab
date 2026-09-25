@@ -78,6 +78,7 @@ class OpenAICompatLLM(HTTPLLM):
         }
         if self.cfg.json_mode:
             body["response_format"] = {"type": "json_object"}
+        body.update(self.cfg.extra_body)
         headers = {"Authorization": f"Bearer {self.api_key}", **self.cfg.extra_headers}
         return f"{base}/chat/completions", headers, body
 
@@ -99,6 +100,7 @@ class AnthropicLLM(HTTPLLM):
             "temperature": self.cfg.temperature,
             "max_tokens": self.cfg.max_tokens,
         }
+        body.update(self.cfg.extra_body)
         headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",

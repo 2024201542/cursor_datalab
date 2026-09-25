@@ -12,11 +12,12 @@ from pathlib import Path
 import httpx
 
 from .aggregate import dawid_skene
-from .config import Config, load_config
+from .config import Config, load_config, load_dotenv
 from .evaluate import evaluate, format_report
 from .io_utils import read_items, write_results
 from .llm import LLMError, create_llm
 from .pipeline import STATUS_TEXT, CrossCheckPipeline, ItemResult
+from .report import build_report
 
 
 def _load_weights(path: str | None) -> dict[str, float] | None:
@@ -62,18 +63,21 @@ def cmd_evaluate(args) -> None:
     if bad:
         raise ValueError(f"金标准中存在配置里没有的标签: {bad}")
 
-    results, stats, elapsed = asyncio.run(_run_pipeline(config, items, _load_weights(args.weights)))
+    loaded = _load_weights(args.weights)
+    results, stats, elapsed = asyncio.run(_run_pipeline(config, items, loaded))
     model_names = [m.name for m in config.models]
     write_results(results, args.output, model_names, prefix="eval")
     _print_summary(results, stats, elapsed)
 
-    rep = evaluate(results, {it["id"]: it["label"] for it in items}, model_names, labels)
+    weights = {m.name: m.weight for m in config.models} | (loaded or {})
+    rep = evaluate(results, {it["id"]: it["label"] for it in items}, model_names, labels, weights)
     text = format_report(rep, labels)
     out = Path(args.output)
     (out / "weights.json").write_text(json.dumps(rep["suggested_weights"], ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "eval_report.txt").write_text(text, encoding="utf-8")
+    html_path = build_report(rep, out)
     print("\n" + text)
-    print(f"\n报告已保存: {out / 'eval_report.txt'}")
+    print(f"\n文字报告: {out / 'eval_report.txt'}\n图表报告: {html_path.resolve()}")
 
 
 def cmd_aggregate(args) -> None:
@@ -169,6 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    load_dotenv()
     args = build_parser().parse_args(argv)
     try:
         args.func(args)

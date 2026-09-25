@@ -42,6 +42,9 @@ class ModelConfig:
     max_tokens: int = 512
     json_mode: bool = False
     extra_headers: dict[str, str] = field(default_factory=dict)
+    extra_body: dict = field(default_factory=dict)
+    max_concurrency: int = 0
+    rpm: int = 0
     mock_accuracy: float = 0.8
     enabled: bool = True
 
@@ -81,6 +84,20 @@ class Config:
     mock_keywords: dict[str, list[str]]
 
 
+def load_dotenv(path: str | Path = ".env") -> None:
+    """把 .env 中的 KEY=VALUE 读入环境变量（已存在的环境变量优先）。"""
+    p = Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip().removeprefix("export ").strip()
+        os.environ.setdefault(key, value.strip().strip("\"'"))
+
+
 def _build(cls, data: dict, where: str):
     if not isinstance(data, dict):
         raise ValueError(f"{where} 应该是一个字典，实际是: {data!r}")
@@ -91,8 +108,17 @@ def _build(cls, data: dict, where: str):
     return cls(**data)
 
 
+def _read_yaml(path: Path) -> dict:
+    """读取 yaml；若含 base 字段，则以 base 指向的配置为底，当前文件的顶层字段覆盖之。"""
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    base = raw.pop("base", None)
+    if base:
+        return {**_read_yaml((path.parent / base).resolve()), **raw}
+    return raw
+
+
 def load_config(path: str | Path, mock: bool = False) -> Config:
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    raw = _read_yaml(Path(path))
 
     t = raw.get("task") or {}
     task = TaskConfig(

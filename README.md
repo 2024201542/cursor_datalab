@@ -2,7 +2,7 @@
 
 让多个大模型像多名标注员一样，对同一批文本**独立分类 → 交叉复核 → 仲裁 → 人工兜底**，用模型之间的相互检查来提升分类准确率，并把真正困难的样本筛出来交给人。
 
-> 当前版本是 **v0.1 基础实现**，核心流程已可用；进阶能力见下方 [项目规划](#项目规划roadmap)。
+> 当前版本是 **v0.1 基础实现**，已接入真实模型并完成实测；进阶能力见下方 [项目规划](#项目规划roadmap)。
 
 ---
 
@@ -63,17 +63,25 @@ python -m crosscheck evaluate data/gold.csv --mock
 
 ### 3. 接入真实模型
 
-编辑 `config.yaml` 中的 `models` 和 `arbiter`，把 key 放到环境变量里（不要写进配置文件）：
+在项目根目录新建 `.env` 文件写入 key（已被 `.gitignore` 忽略，不会上传），程序启动时自动加载：
 
-```powershell
-# PowerShell
-$env:OPENAI_API_KEY="sk-..."
-$env:ANTHROPIC_API_KEY="sk-ant-..."
-$env:DEEPSEEK_API_KEY="sk-..."
-$env:DASHSCOPE_API_KEY="sk-..."
+```ini
+DEEPSEEK_API_KEY=sk-...
+DASHSCOPE_API_KEY=sk-...      # 阿里云百炼：千问、Kimi、GLM 都可以通过它调用
+MOONSHOT_API_KEY=sk-...       # Kimi 官方（可选）
+```
 
+```bash
 python -m crosscheck ping      # 逐个测试模型是否可用
 ```
+
+当前默认配置：投票模型为 `deepseek-flash`（DeepSeek 官方）、`kimi-k2.6`（百炼）、`qwen3.7-plus`（百炼），仲裁模型为 `glm-5.3`（百炼，第四家厂商，不偏向任何投票方）。
+
+接入时的常见坑（已在 `config.yaml` 中处理）：
+
+- 新一代模型多数默认开启“思考模式”，分类任务建议通过 `extra_body` 关闭以提速（DeepSeek：`thinking: {type: disabled}`；百炼：`enable_thinking: false`）
+- Kimi 官方接口不允许 `temperature=0`（思考模式只允许 1，非思考只允许 0.6）
+- 新注册账号限额很低（例如 Kimi 官方并发 1、每分钟 3 次），可用 `max_concurrency` / `rpm` 限流
 
 `provider` 支持三种：
 
@@ -120,6 +128,20 @@ python -m crosscheck aggregate output/results.jsonl
 - `results_need_human.csv`：需要人工处理的样本，附带建议标签和所有模型的理由，`human_label` 列留给人工填写。
 - `results.jsonl`：完整明细（含模型原始回复），用于追溯和二次分析。
 
+### 评估报告与图表
+
+`evaluate` 会在输出目录生成 `report.html`（浏览器打开）和 `charts/` 下的 5 张图：
+
+| 图 | 回答的问题 |
+|---|---|
+| `accuracy.png` | 每个模型单独的准确率 vs 多数投票 vs 加权投票 vs 完整互检，以及最佳单模型和理论上限参考线 |
+| `per_class.png` | 每个类别上哪个模型更强 |
+| `review.png` | 交叉复核前后每个模型的准确率变化 |
+| `status.png` | 样本在各环节（首轮一致 / 复核通过 / 仲裁 / 人工）的去向和各环节准确率 |
+| `confusion.png` | 互检系统的混淆矩阵 |
+
+报告中还有逐条明细表，判错的格子标红。
+
 ### 评估指标
 
 - **单模型准确率**（首轮 / 复核后）：衡量每个模型的能力，以及交叉复核是否带来提升。
@@ -130,13 +152,55 @@ python -m crosscheck aggregate output/results.jsonl
 
 ---
 
+## 实测结果（2026-09）
+
+投票模型 DeepSeek / Kimi / 千问，仲裁模型 GLM。
+
+**客服消息 5 分类**（`data/gold.csv`，60 条，自编，边界规则清晰）
+
+```bash
+python -m crosscheck evaluate data/gold.csv -o output/service
+```
+
+三个模型均为 100%，Kappa = 1.0。说明：**标准清晰、任务简单时，现代大模型之间几乎没有分歧，互检只起确认作用**。
+
+**新闻标题 15 分类**（`data/tnews_gold.csv`，CLUE TNEWS 验证集分层抽样 150 条）
+
+```bash
+python -m crosscheck evaluate data/tnews_gold.csv -c configs/tnews.yaml -o output/tnews
+```
+
+| 方案 | 准确率 |
+|---|---|
+| deepseek-flash | 56.7% |
+| kimi-k2.6 | 55.3% |
+| qwen3.7-plus | 58.0% |
+| 多数投票 | 55.3% |
+| 加权投票 | 55.3% |
+| 互检系统（复核 + 仲裁） | 57.3% |
+| 理论上限（任一模型答对） | 63.3% |
+
+关键发现：
+
+1. **模型错误高度相关**（Kappa = 0.85），投票能提升的空间只有理论上限与最佳单模型之间的 5 个百分点。TNEWS 标签来自头条频道，本身噪声较大，也压低了上限。
+2. **“首轮是否一致”是极强的质量信号**：首轮三家一致的 119 条准确率 64.7%，有分歧的 31 条只有 29%。
+3. **交叉复核存在“从众收敛”**：分歧样本复核后多数变成三家一致，但一致后的准确率仍只有 24%。因此对这类任务，**首轮分歧本身就应该触发人工或仲裁**，而不是看复核后是否一致。
+
+> TNEWS 数据来自 [CLUE Benchmark](https://github.com/CLUEbenchmark/CLUE)。
+
+---
+
 ## 项目结构
 
 ```
 ├── config.yaml              # 分类任务、模型、阈值配置（换任务只需改这里）
+├── configs/
+│   └── tnews.yaml           # 新闻分类任务（base 继承 config.yaml 的模型配置）
+├── .env                     # API key（自行创建，不上传）
 ├── requirements.txt
 ├── data/
-│   ├── gold.csv             # 示例金标准
+│   ├── gold.csv             # 客服消息金标准（60 条）
+│   ├── tnews_gold.csv       # TNEWS 新闻标题金标准（150 条）
 │   └── sample.csv           # 示例待分类数据
 └── crosscheck/
     ├── cli.py               # 命令行入口
@@ -147,6 +211,7 @@ python -m crosscheck aggregate output/results.jsonl
     ├── pipeline.py          # 互检流水线
     ├── aggregate.py         # 加权投票、Dawid-Skene
     ├── evaluate.py          # 评估指标与权重计算
+    ├── report.py            # 图表与 HTML 报告
     └── io_utils.py          # 数据读写
 ```
 
@@ -163,8 +228,22 @@ python -m crosscheck aggregate output/results.jsonl
 - [x] 金标准评估：单模型准确率、Fleiss' Kappa、混淆矩阵、log-odds 自动权重
 - [x] Dawid-Skene 无监督聚合
 - [x] 回复缓存、并发控制、失败重试、mock 模式
+- [x] 接入 DeepSeek / Kimi / 千问 / GLM 真实模型，`.env` 管理 key，单模型并发与 RPM 限流
+- [x] 评估报告：单模型 vs 多数投票 vs 加权投票 vs 互检系统 准确率对比图、分类别对比、复核效果、混淆矩阵、HTML 报告
+- [x] 配置继承（`base`），同一套模型配置复用于多个分类任务
 
-### 🚧 v0.2 成本与稳定性
+### 🌐 v0.2 Web 平台（下一步）
+
+目标：不写命令也能用，上传文件即可得到带图表的结果。
+
+- [ ] 在页面上配置模型：填写 API key / 接口地址 / 模型名，一键测试连通性
+- [ ] 在页面上编辑分类任务：类别、定义、正反例、边界规则
+- [ ] 上传 CSV / Excel，选择文本列和标签列，实时显示进度
+- [ ] 结果页：各模型准确率与投票准确率对比图、分类别对比、分歧样本列表，支持下载结果
+- [ ] 人工审核页：逐条处理“需人工审核”样本，结果回流为金标准
+- [ ] 按实测结论新增策略开关：“首轮不一致即转人工 / 仲裁”
+
+### 🚧 v0.3 成本与稳定性
 
 目标：同等准确率下把成本降到 1/3 以下，并能稳定跑十万级数据。
 
@@ -175,7 +254,7 @@ python -m crosscheck aggregate output/results.jsonl
 - [ ] **选项顺序随机化**：消除模型对靠前选项的位置偏好
 - [ ] **Excel 输入输出**、单元测试与 CI
 
-### 🔬 v0.3 更强的聚合与校准
+### 🔬 v0.4 更强的聚合与校准
 
 目标：让“置信度”真正可信，让投票更聪明。
 
@@ -186,7 +265,7 @@ python -m crosscheck aggregate output/results.jsonl
 - [ ] **更多聚合算法**：接入 [crowd-kit](https://github.com/Toloka/crowd-kit) 的 GLAD、MACE、Wawa 等，自动选择最优聚合方式
 - [ ] **动态阈值**：根据目标准确率（例如 98%）在金标准上自动搜索 `accept_threshold` 与 `arbiter_threshold`
 
-### 🗣️ v0.4 高级协作模式
+### 🗣️ v0.5 高级协作模式
 
 目标：在难例上逼近人类专家水平。
 
@@ -197,7 +276,7 @@ python -m crosscheck aggregate output/results.jsonl
 - [ ] **评审团模式（Jury）**：用多个便宜小模型组成评审团代替单个大模型仲裁，参考论文 *Replacing Judges with Juries (PoLL)*
 - [ ] **多标签 / 层级分类**：支持一条文本多个标签、一级类 → 二级类的层级结构
 
-### 🔁 v0.5 闭环自进化
+### 🔁 v0.6 闭环自进化
 
 目标：越用越准，人工工作量持续下降。
 
@@ -208,7 +287,7 @@ python -m crosscheck aggregate output/results.jsonl
 - [ ] **主动学习**：优先把“对模型提升最大”的样本推给人工标注，而不是随机抽样
 - [ ] **标签噪声检测**：用 [cleanlab](https://github.com/cleanlab/cleanlab) 找出金标准和历史结果中可能标错的样本
 
-### 🏭 v0.6 蒸馏与工程化
+### 🏭 v0.7 蒸馏与工程化
 
 目标：从“实验工具”变成“生产系统”。
 

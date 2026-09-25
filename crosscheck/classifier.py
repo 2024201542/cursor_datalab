@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 import re
+import time
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -119,12 +121,40 @@ class LLMCache:
             self._fh = None
 
 
+class RateLimiter:
+    """单个模型的并发上限 + 每分钟请求数上限（0 表示不限制）。"""
+
+    def __init__(self, max_concurrency: int = 0, rpm: int = 0):
+        self.sem = asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
+        self.interval = 60.0 / rpm if rpm > 0 else 0.0
+        self._lock = asyncio.Lock()
+        self._next = 0.0
+
+    @asynccontextmanager
+    async def slot(self):
+        if self.sem is not None:
+            await self.sem.acquire()
+        try:
+            if self.interval:
+                async with self._lock:
+                    now = time.monotonic()
+                    wait = self._next - now
+                    self._next = max(now, self._next) + self.interval
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            yield
+        finally:
+            if self.sem is not None:
+                self.sem.release()
+
+
 class Classifier:
     def __init__(self, task: TaskConfig, llm: BaseLLM, cache: LLMCache, semaphore: asyncio.Semaphore):
         self.task = task
         self.llm = llm
         self.cache = cache
         self.sem = semaphore
+        self.limiter = RateLimiter(llm.cfg.max_concurrency, llm.cfg.rpm)
         self.stats = {"calls": 0, "cache_hits": 0, "errors": 0}
 
     @property
@@ -147,7 +177,7 @@ class Classifier:
         if from_cache:
             self.stats["cache_hits"] += 1
         else:
-            async with self.sem:
+            async with self.limiter.slot(), self.sem:
                 self.stats["calls"] += 1
                 try:
                     raw = await self.llm.chat(SYSTEM_PROMPT, user)

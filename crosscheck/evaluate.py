@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 
+from .aggregate import weighted_vote
 from .classifier import Prediction
 from .pipeline import STATUS_HUMAN, STATUS_TEXT, ItemResult
 
@@ -40,17 +41,72 @@ def _find(preds: list[Prediction], name: str) -> Prediction | None:
     return next((p for p in preds if p.model == name), None)
 
 
-def evaluate(results: list[ItemResult], gold: dict[str, str], model_names: list[str], labels: list[str]) -> dict:
+def majority_vote(preds: list[Prediction]) -> str | None:
+    """简单多数投票，平票时取置信度之和更高的标签。"""
+    valid = [p for p in preds if p.ok]
+    if not valid:
+        return None
+    count, conf = Counter(), Counter()
+    for p in valid:
+        count[p.label] += 1
+        conf[p.label] += p.confidence
+    return max(count, key=lambda lab: (count[lab], conf[lab]))
+
+
+def _per_class(pred_labels: list[str | None], gold_list: list[str], labels: list[str]) -> dict[str, float | None]:
+    out = {}
+    for lab in labels:
+        idx = [i for i, g in enumerate(gold_list) if g == lab]
+        out[lab] = sum(pred_labels[i] == lab for i in idx) / len(idx) if idx else None
+    return out
+
+
+def _label_acc(pred_labels: list[str | None], gold_list: list[str]) -> float:
+    return sum(p == g for p, g in zip(pred_labels, gold_list)) / len(gold_list) if gold_list else 0.0
+
+
+def evaluate(
+    results: list[ItemResult],
+    gold: dict[str, str],
+    model_names: list[str],
+    labels: list[str],
+    weights: dict[str, float] | None = None,
+) -> dict:
     results = [r for r in results if r.id in gold]
     gold_list = [gold[r.id] for r in results]
     N = len(results)
 
     per_model = {}
+    strategy_preds: dict[str, list[str | None]] = {}
     for m in model_names:
         r1 = [_find(r.round1, m) for r in results]
         # 首轮就一致的样本没有复核轮次，复核后准确率按首轮结果计算
         r2 = [(_find(r.round2, m) if r.round2 else None) or _find(r.round1, m) for r in results]
         per_model[m] = {"round1_acc": _acc(r1, gold_list), "round2_acc": _acc(r2, gold_list)}
+        strategy_preds[m] = [p.label if p is not None and p.ok else None for p in r1]
+
+    strategy_preds["多数投票"] = [majority_vote(r.round1) for r in results]
+    strategy_preds["加权投票"] = [weighted_vote(r.round1, weights or {}).label for r in results]
+    strategy_preds["互检系统"] = [r.label for r in results]
+
+    strategies = {
+        name: {
+            "acc": _label_acc(preds, gold_list),
+            "per_class": _per_class(preds, gold_list, labels),
+            "kind": "model" if name in model_names else "ensemble",
+        }
+        for name, preds in strategy_preds.items()
+    }
+    any_correct = sum(
+        any(p.ok and p.label == g for p in r.round1) for r, g in zip(results, gold_list)
+    ) / N if N else 0.0
+
+    items = []
+    for i, (r, g) in enumerate(zip(results, gold_list)):
+        items.append({
+            "id": r.id, "text": r.text, "gold": g, "status": r.status,
+            **{name: preds[i] for name, preds in strategy_preds.items()},
+        })
 
     auto = [(r, g) for r, g in zip(results, gold_list) if r.status != STATUS_HUMAN]
     by_status = {}
@@ -72,7 +128,12 @@ def evaluate(results: list[ItemResult], gold: dict[str, str], model_names: list[
 
     return {
         "n": N,
+        "labels": labels,
+        "model_names": model_names,
         "per_model": per_model,
+        "strategies": strategies,
+        "any_correct": any_correct,
+        "items": items,
         "system_acc_all": sum(r.label == g for r, g in zip(results, gold_list)) / N if N else 0.0,
         "auto_coverage": len(auto) / N if N else 0.0,
         "auto_acc": sum(r.label == g for r, g in auto) / len(auto) if auto else 0.0,
@@ -89,7 +150,13 @@ def evaluate(results: list[ItemResult], gold: dict[str, str], model_names: list[
 
 def format_report(rep: dict, labels: list[str]) -> str:
     pct = lambda x: f"{x * 100:.1f}%"
-    lines = [f"评估样本数: {rep['n']}", "", "[单个模型准确率]"]
+    lines = [f"评估样本数: {rep['n']}", "", "[准确率对比]"]
+    for name, v in rep["strategies"].items():
+        tag = "单模型" if v["kind"] == "model" else "组合"
+        lines.append(f"  {tag:<4} {name:<10} {pct(v['acc']):>7}")
+    lines.append(f"  参考   任一模型答对（理论上限） {pct(rep['any_correct'])}")
+
+    lines += ["", "[单个模型：交叉复核前后]"]
     for m, v in rep["per_model"].items():
         lines.append(f"  {m:<12} 首轮 {pct(v['round1_acc']):>7}   复核后 {pct(v['round2_acc']):>7}")
 
