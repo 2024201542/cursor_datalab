@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import html
 import io
 import json
 import math
@@ -31,6 +32,20 @@ from crosscheck.io_utils import write_results
 from crosscheck.llm import LLMError, create_llm
 from crosscheck.pipeline import STATUS_HUMAN, STATUS_TEXT, CrossCheckPipeline
 from crosscheck.prompts import build_classify_prompt
+from crosscheck.review import (
+    SCOPES,
+    append_to_gold,
+    list_runs,
+    load_reviews,
+    load_run,
+    merged_rows,
+    review_stats,
+    round1_votes,
+    run_model_names,
+    save_reviews,
+    select_queue,
+    set_review,
+)
 
 st.set_page_config(page_title="多模型互检分类平台", page_icon="🔍", layout="wide")
 load_dotenv()
@@ -195,7 +210,7 @@ with st.sidebar:
 raw = st.session_state.raw
 ver = st.session_state.ver
 config_error = None
-tab_models, tab_task, tab_run = st.tabs(["① 模型配置", "② 分类任务", "③ 运行与结果"])
+tab_models, tab_task, tab_run, tab_review = st.tabs(["① 模型配置", "② 分类任务", "③ 运行与结果", "④ 人工审核"])
 
 # ---------------- ① 模型配置
 with tab_models:
@@ -449,7 +464,189 @@ with tab_run:
         c[2].download_button("⬇ 完整明细 JSONL", paths["jsonl"].read_bytes(), paths["jsonl"].name, width="stretch")
         if "html" in paths:
             c[3].download_button("⬇ 图表报告 HTML", paths["html"].read_bytes(), "report.html", width="stretch")
+        n_human = sum(r.status == STATUS_HUMAN for r in results)
+        if n_human:
+            st.info(f"有 {n_human} 条需要人工审核，可到“④ 人工审核”页逐条处理。")
         with st.expander("模型调用统计"):
             st.dataframe(pd.DataFrame([{"模型": k, "实际请求": v["calls"], "缓存命中": v["cache_hits"], "失败": v["errors"]}
                                        for k, v in last["stats"].items()]), hide_index=True)
         st.caption(f"文件已保存在：{Path(last['out']).resolve()}")
+
+# ---------------- ④ 人工审核
+with tab_review:
+    runs = [p.as_posix() for p in list_runs()]
+    if not runs:
+        st.info("还没有运行结果。先在“③ 运行与结果”页运行一次。")
+        st.stop()
+
+    last = st.session_state.get("last")
+    last_path = Path(last["paths"]["jsonl"]).as_posix() if last else None
+    run_path = st.selectbox(
+        "选择要审核的运行结果", runs, index=runs.index(last_path) if last_path in runs else 0,
+        format_func=lambda s: f"{s}　（{datetime.fromtimestamp(Path(s).stat().st_mtime):%m-%d %H:%M}）",
+    )
+    records = load_run(run_path)
+    reviews = load_reviews(run_path)
+    model_names = run_model_names(records)
+    seen = [lab for r in records for lab in [r["label"]] + [p.get("label") for p in r["round1"]] if lab]
+    labels = list(dict.fromkeys([lab["name"] for lab in raw["task"]["labels"]] + seen))
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    scope = c1.selectbox("审核范围", list(SCOPES), format_func=SCOPES.get,
+                         help="建议除了“需人工审核”外，也定期抽检“首轮一致通过”的样本：模型可能一致地答错")
+    spot_n = c2.number_input("抽检条数", min_value=1, max_value=1000, value=20, disabled=scope != "spot")
+    only_pending = c3.toggle("只显示未审核", value=True)
+    queue = select_queue(records, scope, int(spot_n))
+    todo = [r for r in queue if r["id"] not in reviews] if only_pending else queue
+    done_n = sum(r["id"] in reviews for r in queue)
+    st.progress(done_n / len(queue) if queue else 1.0, text=f"本范围共 {len(queue)} 条，已审核 {done_n} 条")
+
+    mode = st.radio("审核方式", ["逐条审核", "表格批量审核"], horizontal=True)
+    rv_ver = st.session_state.setdefault("rv_ver", 0)
+    idx_key = f"rv_idx|{run_path}|{scope}|{only_pending}"
+
+    if not todo:
+        st.success("本范围内的样本都已审核完 🎉" if queue else "本范围内没有样本")
+    elif mode == "逐条审核":
+        idx = min(st.session_state.get(idx_key, 0), len(todo) - 1)
+        rec = todo[idx]
+        prev = reviews.get(rec["id"], {})
+        head = f"**第 {idx + 1} / {len(todo)} 条**　·　ID `{rec['id']}`　·　{STATUS_TEXT[rec['status']]}"
+        if rec.get("note"):
+            head += f"　·　{rec['note']}"
+        if prev:
+            head += f"　·　✅ 已审核为「{prev['label']}」"
+        st.markdown(head)
+        st.markdown(f"<div style='font-size:1.25rem;padding:14px 18px;background:#f4f7fb;border-radius:8px;"
+                    f"margin:6px 0 12px'>{html.escape(rec['text'])}</div>", unsafe_allow_html=True)
+
+        r2 = {p["model"]: p for p in rec.get("round2") or []}
+        ops = []
+        for p in rec["round1"]:
+            q = r2.get(p["model"], {})
+            ops.append({
+                "模型": p["model"],
+                "首轮": p.get("label") or "失败",
+                "置信度": p.get("confidence") if p.get("label") else None,
+                "首轮理由": p.get("reason") or p.get("error") or "",
+                "复核后": q.get("label") or ("—" if not q else "失败"),
+                "复核理由": q.get("reason", ""),
+            })
+        arb = rec.get("arbiter")
+        if arb:
+            ops.append({"模型": f"{arb['model']}（仲裁）", "首轮": arb.get("label") or "失败",
+                        "置信度": arb.get("confidence") if arb.get("label") else None,
+                        "首轮理由": arb.get("reason") or arb.get("error") or "", "复核后": "", "复核理由": ""})
+        st.dataframe(pd.DataFrame(ops), hide_index=True, width="stretch",
+                     column_config={"置信度": st.column_config.NumberColumn(format="%.2f"),
+                                    "首轮理由": st.column_config.TextColumn(width="large"),
+                                    "复核理由": st.column_config.TextColumn(width="large")})
+
+        votes = round1_votes(rec)
+        current = prev.get("label") or rec["label"]
+
+        def fmt(lab: str) -> str:
+            tags = [f"{votes[lab]} 票"] if lab in votes else []
+            if lab == rec["label"]:
+                tags.append("模型建议")
+            return f"{lab}（{'，'.join(tags)}）" if tags else lab
+
+        choice = st.radio("人工判定", labels, index=labels.index(current) if current in labels else 0,
+                          horizontal=True, format_func=fmt, key=f"rv_choice|{run_path}|{rec['id']}")
+        note = st.text_input("备注（可选）", value=prev.get("note", ""), key=f"rv_note|{run_path}|{rec['id']}")
+        b1, b2, b3 = st.columns([1, 2, 1])
+        if b1.button("⬅ 上一条", disabled=idx == 0, width="stretch"):
+            st.session_state[idx_key] = idx - 1
+            st.rerun()
+        if b2.button("✅ 确认并下一条", type="primary", width="stretch"):
+            set_review(reviews, rec, choice, note.strip())
+            save_reviews(run_path, reviews)
+            if not only_pending:
+                st.session_state[idx_key] = idx + 1
+            st.rerun()
+        if b3.button("跳过 ➡", disabled=idx >= len(todo) - 1, width="stretch"):
+            st.session_state[idx_key] = idx + 1
+            st.rerun()
+    else:
+        table = pd.DataFrame([{
+            "ID": r["id"],
+            "文本": r["text"],
+            "模型建议": r["label"],
+            "各模型首轮": " / ".join(f"{p['model']}:{p.get('label') or '失败'}" for p in r["round1"]),
+            "人工标签": reviews.get(r["id"], {}).get("label"),
+            "备注": reviews.get(r["id"], {}).get("note", ""),
+        } for r in todo])
+        edited = st.data_editor(
+            table, key=f"rv_table|{run_path}|{scope}|{only_pending}|{rv_ver}", hide_index=True, width="stretch",
+            disabled=["ID", "文本", "模型建议", "各模型首轮"],
+            column_config={"人工标签": st.column_config.SelectboxColumn(options=labels),
+                           "文本": st.column_config.TextColumn(width="large")},
+        )
+        by_id = {r["id"]: r for r in todo}
+        c1, c2 = st.columns(2)
+        if c1.button("💾 保存表格中已填写的人工标签", type="primary", width="stretch"):
+            n = 0
+            for _, row in edited.iterrows():
+                lab = _clean(row["人工标签"], "")
+                if lab:
+                    set_review(reviews, by_id[row["ID"]], lab, str(_clean(row["备注"], "")).strip())
+                    n += 1
+            save_reviews(run_path, reviews)
+            st.session_state.rv_ver = rv_ver + 1
+            st.toast(f"已保存 {n} 条")
+            st.rerun()
+        if c2.button("✔ 未填写的全部采用模型建议", width="stretch",
+                     help="适合抽检：只改有问题的几条，其余一键确认"):
+            n = 0
+            for _, row in edited.iterrows():
+                lab = _clean(row["人工标签"], "") or row["模型建议"]
+                set_review(reviews, by_id[row["ID"]], lab, str(_clean(row["备注"], "")).strip())
+                n += 1
+            save_reviews(run_path, reviews)
+            st.session_state.rv_ver = rv_ver + 1
+            st.toast(f"已确认 {n} 条")
+            st.rerun()
+
+    # -------- 统计
+    st.divider()
+    st.subheader("审核统计")
+    stats = review_stats(records, reviews, model_names)
+    if not stats["n"]:
+        st.caption("还没有审核记录。")
+    else:
+        c = st.columns(3)
+        c[0].metric("已审核", f"{stats['n']} / {len(records)}")
+        c[1].metric("互检系统与人工一致", f"{stats['agree']['互检系统'] * 100:.1f}%")
+        c[2].metric("人工改动", f"{stats['changed']} 条")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**与人工判定的一致率**（仅统计已审核样本）")
+            st.bar_chart(pd.DataFrame({"一致率 %": {k: v * 100 for k, v in stats["agree"].items()}}), horizontal=True)
+        with c2:
+            st.markdown("**按处理环节**")
+            st.dataframe(pd.DataFrame([{"处理环节": STATUS_TEXT[s], "已审核": v["n"],
+                                        "模型结果被确认": v["agree"], "确认率": v["agree"] / v["n"] * 100}
+                                       for s, v in stats["by_status"].items()]),
+                         hide_index=True, width="stretch",
+                         column_config={"确认率": st.column_config.NumberColumn(format="%.1f%%")})
+        st.caption("如果审核范围只包含难例（需人工审核、首轮有分歧），这里的一致率会明显低于整体准确率，属正常现象。")
+
+    # -------- 导出与回流
+    st.divider()
+    st.subheader("导出与回流")
+    merged = pd.DataFrame(merged_rows(records, reviews))
+    c1, c2 = st.columns([1, 2])
+    c1.download_button("⬇ 下载最终结果（合并人工审核）", merged.to_csv(index=False).encode("utf-8-sig"),
+                       f"{Path(run_path).stem}_final.csv", width="stretch")
+    with c2:
+        golds = sorted(p.as_posix() for p in Path("data").glob("*.csv"))
+        target = st.selectbox("加入到金标准文件", golds + ["（新建文件）"],
+                              index=len(golds) if golds else 0)
+        if target == "（新建文件）":
+            target = st.text_input("新文件路径", value="data/gold_reviewed.csv")
+        if st.button("📥 把已审核样本加入金标准", disabled=not stats["n"], width="stretch"):
+            try:
+                added, skipped = append_to_gold(records, reviews, target)
+                st.success(f"已写入 {target}：新增 {added} 条，重复跳过 {skipped} 条。之后可以在“③ 运行与结果”页用它评估。")
+            except ValueError as e:
+                st.error(str(e))
