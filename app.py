@@ -29,6 +29,17 @@ from crosscheck.config import (
     save_dotenv,
 )
 from crosscheck.evaluate import evaluate
+from crosscheck.history import (
+    compare_items,
+    delete_run,
+    item_correct,
+    load_meta,
+    mcnemar,
+    set_note,
+    settings_text,
+    summarize,
+    write_meta,
+)
 from crosscheck.io_utils import write_results
 from crosscheck.llm import LLMError, create_llm
 from crosscheck.cost import estimate_run
@@ -57,7 +68,7 @@ ROLE_VOTER, ROLE_ARBITER = "投票", "仲裁"
 MODEL_COLS = {
     "enabled": "启用", "role": "角色", "name": "名称", "provider": "接口类型", "base_url": "接口地址",
     "model": "模型", "api_key_env": "Key 环境变量", "weight": "权重", "temperature": "温度",
-    "max_tokens": "最大输出", "max_concurrency": "并发上限", "rpm": "每分钟请求",
+    "max_tokens": "最大输出", "max_concurrency": "并发上限", "rpm": "每分钟请求", "logprobs": "读取概率",
     "price_in": "输入单价(元/百万token)", "price_out": "输出单价(元/百万token)", "extra_body": "额外参数(JSON)",
 }
 MODEL_DEFAULTS = {
@@ -213,6 +224,30 @@ def guess_col(cols: list[str], names: set[str], fallback: str) -> str:
     return next((c for c in cols if c.lower() in names), fallback)
 
 
+@st.cache_data(show_spinner=False)
+def cached_run(path: str, stamp: int) -> list[dict]:
+    """stamp 是文件修改时间，只用于让缓存在文件变化后失效。"""
+    return load_run(path)
+
+
+def run_records(path: str) -> list[dict]:
+    return cached_run(path, Path(path).stat().st_mtime_ns)
+
+
+def read_gold_file(path: str) -> dict[str, str]:
+    buf = io.BytesIO(Path(path).read_bytes())
+    buf.name = path
+    df = read_upload(buf)
+    df.columns = [str(c).lower() for c in df.columns]
+    if not {"id", "label"} <= set(df.columns):
+        raise ValueError("标签文件需要 id 和 label 两列")
+    return dict(zip(df["id"].astype(str), df["label"].astype(str)))
+
+
+def pct(v) -> float | None:
+    return None if v is None else v * 100
+
+
 # ---------------------------------------------------------------- 页面
 if "raw" not in st.session_state:
     load_into_state("config.yaml")
@@ -235,8 +270,8 @@ with st.sidebar:
 raw = st.session_state.raw
 ver = st.session_state.ver
 config_error = None
-tab_models, tab_task, tab_train, tab_run, tab_review = st.tabs(
-    ["① 模型配置", "② 分类任务", "③ 训练数据（可选）", "④ 运行与结果", "⑤ 人工审核"])
+tab_models, tab_task, tab_train, tab_run, tab_review, tab_history = st.tabs(
+    ["① 模型配置", "② 分类任务", "③ 训练数据（可选）", "④ 运行与结果", "⑤ 人工审核", "⑥ 历史与对比"])
 
 # ---------------- ① 模型配置
 with tab_models:
@@ -254,6 +289,9 @@ with tab_models:
             MODEL_COLS["max_tokens"]: st.column_config.NumberColumn(min_value=16, step=128, default=512),
             MODEL_COLS["max_concurrency"]: st.column_config.NumberColumn(min_value=0, step=1, default=0, help="0 表示不限制"),
             MODEL_COLS["rpm"]: st.column_config.NumberColumn(min_value=0, step=1, default=0, help="0 表示不限制"),
+            MODEL_COLS["logprobs"]: st.column_config.CheckboxColumn(
+                default=False, help="读取标签的输出概率（logprobs）作为级联的置信度，仅 OpenAI 兼容接口。"
+                                    "千问、Kimi 可用；DeepSeek 在温度 0 时只返回 0 / 1，没有区分度"),
             MODEL_COLS["price_in"]: st.column_config.NumberColumn(min_value=0.0, step=0.1, default=0.0, format="%.2f",
                                                                   help="用于费用预估和统计，按官网价格填写；0 表示不计费用、只统计 token"),
             MODEL_COLS["price_out"]: st.column_config.NumberColumn(min_value=0.0, step=0.1, default=0.0, format="%.2f"),
@@ -521,15 +559,27 @@ with tab_run:
         concurrency = c1.number_input("总并发请求数", min_value=1, max_value=64, value=int(p.get("concurrency", 8)))
         mock = c2.toggle("mock 模式（不调用真实 API，只测流程）", value=False)
         voters = [m["name"] for m in raw.get("models") or [] if m.get("enabled", True)]
-        cascade = st.multiselect(
-            "级联调用（可选）：首轮先只问这几个模型，它们全部一致就直接采纳，不再调用其余模型",
+        c1, c2 = st.columns([3, 1])
+        cascade = c1.multiselect(
+            "级联调用（可选）：首轮先只问这几个模型，满足条件就直接采纳，不再调用其余模型",
             voters, default=[n for n in p.get("cascade") or [] if n in voters], key=f"cascade_{ver}",
-            help="有本地小模型时推荐“本地小模型 + 一个大模型”：实测大模型调用量降到约 57%，人工兜底后的准确率与四票全一致接近。"
+            help="有本地小模型时推荐“本地小模型 + 一个大模型”：实测费用降到约 40%，人工兜底后的准确率只比四票全一致低约 2 个百分点。"
                  "没有训练数据时可选两个大模型，约省 30%，但准确率会下降几个百分点。",
         )
-        if cascade and not 2 <= len(cascade) < len(voters):
-            st.warning("级联至少选 2 个模型，且要少于全部投票模型，否则不生效。")
+        casc_th = c2.slider("级联置信度门槛", 0.0, 1.0, float(p.get("cascade_min_confidence", 0.0)), 0.05,
+                            key=f"casc_th_{ver}", disabled=not cascade,
+                            help="0 = 首批模型一致就采纳。> 0 时还要求每个模型的置信度都达到门槛，此时首批可以只选 1 个模型。"
+                                 "置信度优先用 logprobs 概率（模型配置里勾选“读取概率”），其次是模型自报的置信度；本地小模型为预测概率")
+        need = 1 if casc_th > 0 else 2
+        if cascade and not need <= len(cascade) < len(voters):
+            st.warning(f"级联至少选 {need} 个模型，且要少于全部投票模型，否则不生效。")
             cascade = []
+        shuffle = st.toggle("选项顺序随机化", value=bool((raw.get("task") or {}).get("shuffle_labels", False)),
+                            key=f"shuffle_{ver}",
+                            help="每个模型、每条文本看到的类别顺序不同（按哈希固定，重跑仍命中缓存），消除模型对靠前选项的偏好。"
+                                 "开启后提示词变化，已有缓存不再命中")
+        run_note = st.text_input("本次运行备注（可选，显示在“⑥ 历史与对比”页）", key="run_note",
+                                 placeholder="例如：换了千问新版本 / 加了 3 条边界规则")
 
         sub = df if not limit else df.head(int(limit))
         items, bad = [], set()
@@ -566,7 +616,9 @@ with tab_run:
 
         run_raw = copy.deepcopy(raw)
         run_raw["pipeline"] = {**p, "disagreement_action": action, "accept_threshold": accept,
-                               "arbiter_threshold": arb_th, "concurrency": int(concurrency), "cascade": cascade}
+                               "arbiter_threshold": arb_th, "concurrency": int(concurrency), "cascade": cascade,
+                               "cascade_min_confidence": casc_th if cascade else 0.0}
+        run_raw["task"] = {**run_raw.get("task", {}), "shuffle_labels": shuffle}
 
         c1, c2, c3 = st.columns([1, 1, 2])
         rate = c2.slider("预估时假设的分歧比例", 0.0, 1.0, 0.25, 0.05,
@@ -606,12 +658,16 @@ with tab_run:
                 st.stop()
             out = Path("output/web") / datetime.now().strftime("%Y%m%d_%H%M%S")
             model_names = [m.name for m in config.models]
-            paths = write_results(results, out, model_names)
+            gold = {it["id"]: it["label"] for it in items} if label_col != "（无，只做分类）" else None
+            paths = write_results(results, out, model_names, gold=gold)
+            write_meta(paths["jsonl"], source="web", input_name=getattr(up, "name", "上传文件"), config=config,
+                       raw=run_raw, stats=stats, elapsed=elapsed, n=len(items), has_gold=bool(gold),
+                       config_path=st.session_state.get("cfg_path", "config.yaml"), note=run_note.strip())
             rep = None
-            if label_col != "（无，只做分类）":
+            if gold:
                 from crosscheck.report import build_report
                 weights = {m.name: m.weight for m in config.models}
-                rep = evaluate(results, {it["id"]: it["label"] for it in items}, model_names, config.task.label_names, weights)
+                rep = evaluate(results, gold, model_names, config.task.label_names, weights)
                 paths["html"] = build_report(rep, out)
             st.session_state.last = {"results": results, "stats": stats, "elapsed": elapsed, "rep": rep,
                                      "paths": paths, "out": out, "model_names": model_names}
@@ -719,7 +775,223 @@ with tab_run:
         st.caption("token 为接口返回的实际用量（接口未返回时按字数估算）；未设置单价的模型费用按 0 计算。")
         st.caption(f"文件已保存在：{Path(last['out']).resolve()}")
 
-# ---------------- ④ 人工审核
+# ---------------- ⑥ 历史与对比（写在审核页之前：审核页没有结果时会 st.stop）
+with tab_history:
+    entries = []
+    for rp in (p.as_posix() for p in list_runs()):
+        try:
+            recs = run_records(rp)
+        except (OSError, ValueError):
+            continue
+        if recs:
+            meta = load_meta(rp)
+            entries.append({"path": rp, "meta": meta, "records": recs, "summary": summarize(recs, meta)})
+    if not entries:
+        st.info("还没有运行记录。在“④ 运行与结果”页运行一次，或用命令行 classify / evaluate。")
+    else:
+        by_path = {e["path"]: e for e in entries}
+
+        def run_time(e: dict) -> str:
+            return e["meta"].get("time") or f"{datetime.fromtimestamp(Path(e['path']).stat().st_mtime):%Y-%m-%d %H:%M:%S}"
+
+        run_name, used = {}, set()
+        for e in entries:
+            name = f"{run_time(e)[5:16]} {e['meta'].get('note') or Path(e['path']).parent.name}"
+            while name in used:
+                name += "*"
+            used.add(name)
+            run_name[e["path"]] = name
+
+        st.caption("每次运行（网页或命令行）都会记录时间、数据、配置快照和费用。勾选“对比”列选择要对比的运行，备注可直接编辑。")
+        inputs = sorted({e["meta"].get("input") or "（未记录）" for e in entries})
+        c1, c2 = st.columns([3, 1])
+        pick_inputs = c1.multiselect("按数据筛选", inputs, placeholder="全部数据")
+        only_gold = c2.toggle("只看有真实标签的运行", value=False)
+        shown = [e for e in entries
+                 if (not pick_inputs or (e["meta"].get("input") or "（未记录）") in pick_inputs)
+                 and (not only_gold or e["summary"]["gold_n"])]
+        hist = pd.DataFrame([{
+            "对比": False,
+            "时间": run_time(e)[:16],
+            "备注": e["meta"].get("note", ""),
+            "数据": e["meta"].get("input") or "（未记录）",
+            "条数": e["summary"]["n"],
+            "方案": settings_text(e["meta"], e["records"]),
+            "自动采纳": pct(e["summary"]["auto_rate"]),
+            "全自动准确率": pct(e["summary"].get("acc")),
+            "自动采纳准确率": pct(e["summary"].get("auto_acc")),
+            "人工兜底后": pct(e["summary"].get("with_human")),
+            "大模型调用/条": e["summary"]["calls_per_item"],
+            "本次费用": e["summary"]["cost"],
+            "不计缓存费用": e["summary"]["full_cost"],
+            "路径": e["path"],
+        } for e in shown], columns=["对比", "时间", "备注", "数据", "条数", "方案", "自动采纳", "全自动准确率", "自动采纳准确率",
+                                     "人工兜底后", "大模型调用/条", "本次费用", "不计缓存费用", "路径"])
+        pct_cfg = st.column_config.NumberColumn(format="%.1f%%")
+        yuan_cfg = st.column_config.NumberColumn(format="%.4f 元")
+        edited_hist = st.data_editor(
+            hist, hide_index=True, width="stretch", key=f"hist_{len(entries)}_{'|'.join(pick_inputs)}_{only_gold}",
+            disabled=[c for c in hist.columns if c not in ("对比", "备注")],
+            column_config={
+                "对比": st.column_config.CheckboxColumn(width="small"),
+                "方案": st.column_config.TextColumn(width="large"),
+                "自动采纳": pct_cfg, "全自动准确率": pct_cfg, "自动采纳准确率": pct_cfg, "人工兜底后": pct_cfg,
+                "大模型调用/条": st.column_config.NumberColumn(format="%.2f"),
+                "本次费用": yuan_cfg,
+                "不计缓存费用": st.column_config.NumberColumn(
+                    format="%.4f 元", help="本次费用 + 缓存节省：假如所有调用都是新请求需要花的钱，用来公平比较不同方案的成本"),
+            },
+        )
+        st.caption("全自动准确率：分歧样本也取模型建议；人工兜底后：需人工的样本假设人工判对。早期运行的费用没有记录。")
+        note_changes = [(r["路径"], str(_clean(r["备注"], "")).strip()) for _, r in edited_hist.iterrows()
+                        if str(_clean(r["备注"], "")).strip() != (by_path[r["路径"]]["meta"].get("note") or "")]
+        if note_changes and st.button(f"💾 保存备注（{len(note_changes)} 条）"):
+            for rp, note in note_changes:
+                set_note(rp, note)
+            st.rerun()
+        selected = [r["路径"] for _, r in edited_hist.iterrows() if r["对比"]]
+
+        # -------- 运行详情
+        st.divider()
+        st.subheader("运行详情")
+        detail_path = st.selectbox("选择运行", [e["path"] for e in shown] or [entries[0]["path"]], format_func=run_name.get)
+        e = by_path[detail_path]
+        meta, s = e["meta"], e["summary"]
+        c = st.columns(5)
+        c[0].metric("条数", s["n"], f"需人工 {s['human']} 条", delta_color="off")
+        c[1].metric("自动采纳", f"{s['auto_rate'] * 100:.1f}%")
+        if s["gold_n"]:
+            c[2].metric("全自动准确率", f"{s['acc'] * 100:.1f}%")
+            c[3].metric("人工兜底后", f"{s['with_human'] * 100:.1f}%")
+        c[4].metric("本次费用", "未记录" if s["cost"] is None else f"{s['cost']:.4f} 元",
+                    None if s["full_cost"] is None else f"不计缓存 {s['full_cost']:.4f} 元", delta_color="off")
+        st.caption(f"方案：{settings_text(meta, e['records'])}　·　数据：{meta.get('input') or '未记录'}　·　"
+                   f"配置文件：{meta.get('config_path') or '未记录'}　·　来源：{meta.get('source') or '未记录'}　·　"
+                   f"文件：{detail_path}")
+        if meta.get("backfilled"):
+            st.caption("这次运行早于运行记录功能，元信息为事后补录：策略按结果推断，配置快照是补录时的配置文件内容。")
+        c1, c2 = st.columns(2)
+        if s.get("per_model"):
+            c1.markdown("**各模型首轮准确率**")
+            c1.dataframe(pd.DataFrame([{"模型": k, "准确率": pct(v)} for k, v in s["per_model"].items()]),
+                         hide_index=True, width="stretch", column_config={"准确率": pct_cfg})
+        if meta.get("stats"):
+            c2.markdown("**调用与费用**")
+            c2.dataframe(pd.DataFrame([{"模型": k, "请求": v["calls"], "缓存命中": v["cache_hits"],
+                                        "输入 token": v.get("in_tokens", 0), "输出 token": v.get("out_tokens", 0),
+                                        "费用": v.get("cost", 0.0)} for k, v in meta["stats"].items()]),
+                         hide_index=True, width="stretch", column_config={"费用": yuan_cfg})
+        if meta.get("config"):
+            with st.expander("配置快照（这次运行实际使用的模型、任务和策略）"):
+                st.json(meta["config"], expanded=False)
+        c1, c2, c3 = st.columns([2, 1, 1])
+        if c1.button("📥 载入这次运行的配置", disabled=not meta.get("config"), width="stretch",
+                     help="把模型、类别定义、规则、训练数据和运行策略恢复为这次运行时的设置，用于复现或在此基础上修改"):
+            snap = copy.deepcopy(meta["config"])
+            st.session_state.raw = snap
+            st.session_state.models_df = models_to_df(snap)
+            st.session_state.labels_df = labels_to_df(snap)
+            st.session_state.ver = st.session_state.get("ver", 0) + 1
+            st.toast("已载入，可在前四页查看；需要长期保留时在侧边栏保存")
+            st.rerun()
+        confirm = c2.checkbox("确认删除", key=f"del_ok|{detail_path}", help="删除这次运行的结果文件和审核记录，不可恢复")
+        if c3.button("🗑 删除这次运行", disabled=not confirm, width="stretch"):
+            delete_run(detail_path)
+            st.cache_data.clear()
+            st.rerun()
+
+        # -------- 多次运行对比
+        st.divider()
+        st.subheader("多次运行对比")
+        if len(selected) < 2:
+            st.caption("在上方表格的“对比”列勾选 2 个或更多运行。最适合同一份数据换模型、换策略、改规则前后的对比。")
+        else:
+            runs = {run_name[rp]: by_path[rp]["records"] for rp in selected}
+            gold_ext = None
+            if not all(by_path[rp]["summary"]["gold_n"] for rp in selected):
+                files = sorted(p.as_posix() for p in Path("data").glob("**/*") if p.suffix.lower() in (".csv", ".xlsx", ".xls", ".jsonl"))
+                gf = st.selectbox("部分运行没有真实标签。可选一个含 id、label 列的标签文件作为对照（按 id 匹配）", ["（不使用）"] + files)
+                if gf != "（不使用）":
+                    try:
+                        gold_ext = read_gold_file(gf)
+                    except (ValueError, OSError) as err:
+                        st.error(str(err))
+            common, rows = compare_items(runs, gold_ext)
+            gold_map = {r["id"]: r["gold"] for r in rows if r["gold"]}
+            if not common:
+                st.warning("这些运行没有共同样本（id 不一致），无法对比。")
+            else:
+                st.caption(f"共同样本 {len(common)} 条（按 id 匹配），其中 {len(gold_map)} 条有真实标签；以下指标只在共同样本上计算，费用为整次运行。")
+                cid = set(common)
+                comp = []
+                for rp in selected:
+                    name = run_name[rp]
+                    sub = summarize([r for r in by_path[rp]["records"] if r["id"] in cid], by_path[rp]["meta"], gold_map or None)
+                    comp.append({"运行": name, "方案": settings_text(by_path[rp]["meta"], by_path[rp]["records"]),
+                                 "自动采纳": pct(sub["auto_rate"]), "全自动准确率": pct(sub.get("acc")),
+                                 "自动采纳准确率": pct(sub.get("auto_acc")), "人工兜底后": pct(sub.get("with_human")),
+                                 "大模型调用/条": sub["calls_per_item"], "不计缓存费用": by_path[rp]["summary"]["full_cost"],
+                                 **{f"{m}": pct(v) for m, v in (sub.get("per_model") or {}).items()}})
+                comp_df = pd.DataFrame(comp)
+                model_cols = [c for c in comp_df.columns if c not in ("运行", "方案", "自动采纳", "全自动准确率", "自动采纳准确率",
+                                                                     "人工兜底后", "大模型调用/条", "不计缓存费用")]
+                st.dataframe(comp_df, hide_index=True, width="stretch",
+                             column_config={**{c: pct_cfg for c in ["自动采纳", "全自动准确率", "自动采纳准确率", "人工兜底后"] + model_cols},
+                                            "大模型调用/条": st.column_config.NumberColumn(format="%.2f"),
+                                            "不计缓存费用": yuan_cfg, "方案": st.column_config.TextColumn(width="large")})
+                if model_cols:
+                    st.caption(f"{' / '.join(model_cols)} 列为各模型首轮单独的准确率（级联下只统计被调用的样本）。")
+                if gold_map:
+                    st.bar_chart(comp_df.set_index("运行")[["全自动准确率", "自动采纳准确率", "人工兜底后"]], stack=False, horizontal=True)
+
+                    st.markdown("**差异是否显著**")
+                    names = list(runs)
+                    c1, c2 = st.columns([1, 2])
+                    base_name = c1.selectbox("基准运行", names)
+                    metric = c2.radio("比较指标", ["acc", "with_human"], horizontal=True,
+                                      format_func={"acc": "全自动准确率", "with_human": "人工兜底后准确率"}.get)
+                    maps = {n: {r["id"]: r for r in recs} for n, recs in runs.items()}
+                    gid = [i for i in common if i in gold_map]
+                    base_ok = [item_correct(maps[base_name][i], gold_map[i], metric) for i in gid]
+                    tests = []
+                    for n in names:
+                        if n == base_name:
+                            continue
+                        ok = [item_correct(maps[n][i], gold_map[i], metric) for i in gid]
+                        t = mcnemar(ok, base_ok)
+                        tests.append({"对比运行": n, "准确率差（百分点）": (sum(ok) - sum(base_ok)) / len(gid) * 100,
+                                      "仅它判对": t["only_a"], "仅基准判对": t["only_b"], "p 值": t["p"],
+                                      "结论": "显著" if t["p"] < 0.05 else "不显著，可能是随机波动"})
+                    st.dataframe(pd.DataFrame(tests), hide_index=True, width="stretch",
+                                 column_config={"准确率差（百分点）": st.column_config.NumberColumn(format="%+.1f"),
+                                                "p 值": st.column_config.NumberColumn(format="%.3f")})
+                    st.caption("McNemar 精确检验：在同一批样本上，只看两次运行一个判对、一个判错的样本。p < 0.05 表示差异不太可能是随机波动；"
+                               "150 条样本上相差 3~5 个百分点通常还不显著。")
+
+                st.markdown("**逐条对照**")
+                view = st.radio("显示", ["结论不同的样本", "有运行判错的样本", "全部"], horizontal=True, key="cmp_view")
+                names = list(runs)
+                disp, mask = [], []
+                for r in rows:
+                    labels_now = [r[n] for n in names]
+                    wrong = [bool(r["gold"]) and r[n] != r["gold"] for n in names]
+                    if view == "结论不同的样本" and len(set(labels_now)) == 1:
+                        continue
+                    if view == "有运行判错的样本" and not any(wrong):
+                        continue
+                    disp.append({"ID": r["id"], "文本": r["text"], "真实标签": r["gold"] or "",
+                                 **{n: f"{r[n]}{'（人工）' if r[f'{n}|status'] == STATUS_HUMAN else ''}" for n in names}})
+                    mask.append(wrong)
+                st.caption(f"{len(disp)} 条。标红为判错；“（人工）”表示该运行把这条交给人工审核。")
+                if disp:
+                    ddf = pd.DataFrame(disp)
+                    mdf = pd.DataFrame(mask, columns=names, index=ddf.index)
+                    css = "background-color:#fdecea;color:#c0392b"
+                    st.dataframe(ddf.style.apply(lambda _: mdf.map(lambda w: css if w else ""), axis=None, subset=names),
+                                 hide_index=True, width="stretch", column_config={"文本": st.column_config.TextColumn(width="large")})
+                    st.download_button("⬇ 下载对照表 CSV", ddf.to_csv(index=False).encode("utf-8-sig"), "compare.csv")
+
+# ---------------- ⑤ 人工审核
 with tab_review:
     runs = [p.as_posix() for p in list_runs()]
     if not runs:

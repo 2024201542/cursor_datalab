@@ -51,7 +51,9 @@ def _pred_cells(preds, name):
     return "", ""
 
 
-def write_results(results: list[ItemResult], out_dir: str | Path, model_names: list[str], prefix: str = "results") -> dict[str, Path]:
+def write_results(results: list[ItemResult], out_dir: str | Path, model_names: list[str], prefix: str = "results",
+                  gold: dict[str, str] | None = None) -> dict[str, Path]:
+    """gold 为评估时的真实标签，写入 jsonl 的 gold 字段，供历史对比使用。"""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -62,7 +64,10 @@ def write_results(results: list[ItemResult], out_dir: str | Path, model_names: l
 
     with paths["jsonl"].open("w", encoding="utf-8") as f:
         for r in results:
-            f.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
+            d = r.to_dict()
+            if gold and r.id in gold:
+                d["gold"] = gold[r.id]
+            f.write(json.dumps(d, ensure_ascii=False) + "\n")
 
     header = ["id", "text", "label", "status", "status_text", "confidence"]
     for m in model_names:

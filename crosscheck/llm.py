@@ -22,6 +22,7 @@ class Reply:
     text: str
     in_tokens: int | None = None   # 接口返回的用量；None 表示接口没有返回
     out_tokens: int | None = None
+    tokens: list[tuple[str, float]] | None = None  # 开启 logprobs 时每个输出 token 及其对数概率
 
 
 class BaseLLM:
@@ -57,6 +58,9 @@ class HTTPLLM(BaseLLM):
     def _parse_usage(self, data: dict) -> tuple[int | None, int | None]:
         return None, None
 
+    def _parse_logprobs(self, data: dict) -> list[tuple[str, float]] | None:
+        return None
+
     async def chat(self, system: str, user: str) -> str:
         return (await self.complete(system, user)).text
 
@@ -74,7 +78,7 @@ class HTTPLLM(BaseLLM):
                         data = resp.json()
                     except ValueError as e:
                         raise LLMError(f"[{self.cfg.name}] 响应不是合法 JSON: {e}") from e
-                    return Reply(self._parse_response(data), *self._parse_usage(data))
+                    return Reply(self._parse_response(data), *self._parse_usage(data), self._parse_logprobs(data))
                 last_err = f"HTTP {resp.status_code}: {resp.text[:300]}"
                 if resp.status_code not in RETRY_STATUS:
                     break
@@ -97,6 +101,8 @@ class OpenAICompatLLM(HTTPLLM):
         }
         if self.cfg.json_mode:
             body["response_format"] = {"type": "json_object"}
+        if self.cfg.logprobs:
+            body["logprobs"] = True
         body.update(self.cfg.extra_body)
         headers = {"Authorization": f"Bearer {self.api_key}", **self.cfg.extra_headers}
         return f"{base}/chat/completions", headers, body
@@ -112,6 +118,15 @@ class OpenAICompatLLM(HTTPLLM):
         if not isinstance(u, dict):
             return None, None
         return u.get("prompt_tokens"), u.get("completion_tokens")
+
+    def _parse_logprobs(self, data):
+        if not self.cfg.logprobs:
+            return None
+        try:
+            content = data["choices"][0]["logprobs"]["content"]
+            return [(t["token"], float(t["logprob"])) for t in content] if content else None
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
 
 
 class AnthropicLLM(HTTPLLM):

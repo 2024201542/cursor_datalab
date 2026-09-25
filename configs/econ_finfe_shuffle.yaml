@@ -1,0 +1,40 @@
+# 股吧情绪：混合版 + 选项顺序随机化 + 读取 logprobs
+# 每个模型、每条文本看到的类别顺序不同（按哈希固定），用来检验位置偏好；
+# 千问和 Kimi 返回标签的输出概率，用于按置信度级联。DeepSeek 在温度 0 时 logprobs 只有 0 / 1，不开启。
+base: econ_finfe_hybrid.yaml
+
+task.shuffle_labels: true
+
+models:
+  - name: deepseek
+    provider: openai
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-flash
+    extra_body:
+      thinking: {type: disabled}
+    price_in: 2.0
+    price_out: 8.0
+
+  - name: kimi
+    provider: openai
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    model: kimi-k2.6
+    logprobs: true
+    price_in: 6.5
+    price_out: 27.0
+
+  - name: qwen
+    provider: openai
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    model: qwen3.7-plus
+    extra_body:
+      enable_thinking: false
+    logprobs: true
+    price_in: 2.0
+    price_out: 8.0
+
+  - name: local
+    provider: local

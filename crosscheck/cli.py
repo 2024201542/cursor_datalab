@@ -12,9 +12,10 @@ from pathlib import Path
 import httpx
 
 from .aggregate import dawid_skene
-from .config import Config, load_config, load_dotenv
+from .config import Config, load_config, load_dotenv, read_raw_config
 from .cost import estimate_run, format_estimate
 from .evaluate import evaluate, format_report
+from .history import write_meta
 from .io_utils import read_items, write_results
 from .llm import LLMError, create_llm
 from .pipeline import STATUS_TEXT, CrossCheckPipeline, ItemResult
@@ -107,6 +108,12 @@ def _check_budget(config: Config, items: list[dict], args) -> None:
                          "可以先用 --limit 试跑，或开启级联 / 调整模型。")
 
 
+def _save_meta(args, config: Config, path: Path, source: str, stats: dict, elapsed: float, n: int, has_gold: bool) -> None:
+    write_meta(path, source=source, input_name=Path(args.input).as_posix(), config=config,
+               raw=read_raw_config(args.config), stats=stats, elapsed=elapsed, n=n, has_gold=has_gold,
+               config_path=Path(args.config).as_posix(), note=args.note)
+
+
 def cmd_classify(args) -> None:
     config = load_config(args.config, mock=args.mock)
     items = read_items(args.input, args.text_col, args.id_col)
@@ -117,6 +124,7 @@ def cmd_classify(args) -> None:
     results, stats, elapsed = asyncio.run(
         _run_pipeline(config, items, _load_weights(args.weights), ckpt, args.resume))
     paths = write_results(results, args.output, [m.name for m in config.models])
+    _save_meta(args, config, paths["jsonl"], "classify", stats, elapsed, len(items), False)
     ckpt.unlink(missing_ok=True)
     _print_summary(results, stats, elapsed)
     print(f"\n结果: {paths['csv']}\n明细: {paths['jsonl']}\n人工审核: {paths['human']}")
@@ -135,12 +143,14 @@ def cmd_evaluate(args) -> None:
     ckpt = _checkpoint(args.output, "eval")
     results, stats, elapsed = asyncio.run(_run_pipeline(config, items, loaded, ckpt, args.resume))
     model_names = [m.name for m in config.models]
-    write_results(results, args.output, model_names, prefix="eval")
+    gold = {it["id"]: it["label"] for it in items}
+    paths = write_results(results, args.output, model_names, prefix="eval", gold=gold)
+    _save_meta(args, config, paths["jsonl"], "evaluate", stats, elapsed, len(items), True)
     ckpt.unlink(missing_ok=True)
     _print_summary(results, stats, elapsed)
 
     weights = {m.name: m.weight for m in config.models} | (loaded or {})
-    rep = evaluate(results, {it["id"]: it["label"] for it in items}, model_names, labels, weights)
+    rep = evaluate(results, gold, model_names, labels, weights)
     text = format_report(rep, labels)
     out = Path(args.output)
     (out / "weights.json").write_text(json.dumps(rep["suggested_weights"], ensure_ascii=False, indent=2), encoding="utf-8")
@@ -221,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--budget", type=float, default=0, help="费用预算（元），预计费用超出时不运行")
             p.add_argument("--estimate-only", action="store_true", help="只预估调用次数和费用，不运行")
             p.add_argument("--disagree-rate", type=float, default=0.25, help="预估时假设的首轮分歧比例（默认 0.25）")
+            p.add_argument("--note", default="", help="本次运行的备注，显示在网页的历史记录中")
 
     p = sub.add_parser("classify", help="对数据进行互检分类")
     p.add_argument("input", help="输入 .csv / .jsonl")

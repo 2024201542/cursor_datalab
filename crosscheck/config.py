@@ -29,6 +29,8 @@ class TaskConfig:
     description: str
     labels: list[LabelDef]
     rules: list[str] = field(default_factory=list)
+    # 选项顺序随机化：每个模型、每条文本看到的类别顺序不同（按哈希固定，缓存仍可复用），消除位置偏好
+    shuffle_labels: bool = False
 
     @property
     def label_names(self) -> list[str]:
@@ -47,6 +49,8 @@ class ModelConfig:
     temperature: float = 0.0
     max_tokens: int = 512
     json_mode: bool = False
+    # 读取标签的输出概率作为置信度（仅 OpenAI 兼容接口）。DeepSeek 在温度 0 时只返回 0 / 1，没有区分度
+    logprobs: bool = False
     extra_headers: dict[str, str] = field(default_factory=dict)
     extra_body: dict = field(default_factory=dict)
     max_concurrency: int = 0
@@ -71,6 +75,9 @@ class PipelineConfig:
     min_votes: int = 2
     # 级联：首轮先只调用这些模型（按名称），它们全部给出有效且一致的结果就直接采纳，不再调用其余模型
     cascade: list[str] = field(default_factory=list)
+    # 级联的置信度门槛：首批模型一致且每个模型的置信度都 ≥ 该值才直接采纳；0 表示只看是否一致。
+    # 置信度优先用 logprobs 概率，其次是模型自报的置信度，本地小模型为预测概率。> 0 时首批可以只有 1 个模型
+    cascade_min_confidence: float = 0.0
     disagreement_action: str = "human"
     cross_review: bool = True
     accept_threshold: float = 0.6
@@ -150,12 +157,23 @@ def save_dotenv(updates: dict[str, str], path: str | Path = ".env") -> None:
 
 
 def read_raw_config(path: str | Path) -> dict:
-    """读取 yaml；若含 base 字段，则以 base 指向的配置为底，当前文件的顶层字段覆盖之。"""
+    """读取 yaml；若含 base 字段，则以 base 指向的配置为底，当前文件的顶层字段整体覆盖之。
+
+    带点的键只改一个嵌套字段，例如 `task.shuffle_labels: true` 只修改 task 下的 shuffle_labels。
+    """
     path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     base = raw.pop("base", None)
+    dotted = {k: raw.pop(k) for k in [k for k in raw if "." in k]}
     if base:
-        return {**read_raw_config((path.parent / base).resolve()), **raw}
+        raw = {**read_raw_config((path.parent / base).resolve()), **raw}
+    for key, value in dotted.items():
+        node = raw
+        *parents, leaf = key.split(".")
+        for part in parents:
+            node[part] = copy.deepcopy(node.get(part) or {})
+            node = node[part]
+        node[leaf] = value
     return raw
 
 
@@ -177,6 +195,7 @@ def config_from_dict(raw: dict, mock: bool = False) -> Config:
         description=t.get("description", ""),
         labels=[_build(LabelDef, lab, f"task.labels[{i}]") for i, lab in enumerate(t.get("labels") or [])],
         rules=list(t.get("rules") or []),
+        shuffle_labels=bool(t.get("shuffle_labels", False)),
     )
 
     models = [_build(ModelConfig, m, f"models[{i}]") for i, m in enumerate(raw.get("models") or [])]
@@ -243,5 +262,9 @@ def _validate(config: Config) -> None:
         missing = [n for n in pc.cascade if n not in model_names]
         if missing:
             raise ValueError(f"pipeline.cascade 中的模型不存在或未启用: {missing}")
-        if len(set(pc.cascade)) < 2 or len(set(pc.cascade)) >= len(model_names):
-            raise ValueError("pipeline.cascade 至少要有 2 个模型，且要少于全部投票模型，否则级联没有意义")
+        need = 1 if pc.cascade_min_confidence > 0 else 2
+        if len(set(pc.cascade)) < need or len(set(pc.cascade)) >= len(model_names):
+            raise ValueError("pipeline.cascade 要少于全部投票模型，且至少 2 个（设置了 cascade_min_confidence 时可以只有 1 个），"
+                             "否则级联没有意义")
+    if not 0 <= pc.cascade_min_confidence <= 1:
+        raise ValueError("pipeline.cascade_min_confidence 必须在 0 到 1 之间")

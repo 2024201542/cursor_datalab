@@ -110,9 +110,14 @@ class CrossCheckPipeline:
         first = [c for c in self.classifiers if c.name in pc.cascade] if pc.cascade else self.classifiers
         r1 = list(await asyncio.gather(*(c.classify(text, ex) for c in first)))
         if len(first) < len(self.classifiers):
-            if all(p.ok for p in r1) and len({p.label for p in r1}) == 1:
+            th = pc.cascade_min_confidence
+            if (all(p.ok for p in r1) and len({p.label for p in r1}) == 1
+                    and all(p.certainty >= th for p in r1)):
                 conf = sum(p.confidence for p in r1) / len(r1)
-                note = f"级联：{' / '.join(c.name for c in first)} 一致，未调用其余模型"
+                names = " / ".join(c.name for c in first)
+                conds = (["一致"] if len(first) > 1 else []) + ([f"置信度 ≥ {th:g}"] if th > 0 else [])
+                cond = "且".join(conds)
+                note = f"级联：{names} {cond}，未调用其余模型"
                 return ItemResult(item_id, text, r1[0].label, STATUS_CONSENSUS, round(conf, 3), r1, note=note)
             rest = [c for c in self.classifiers if c not in first]
             done = {p.model: p for p in r1 + list(await asyncio.gather(*(c.classify(text, ex) for c in rest)))}

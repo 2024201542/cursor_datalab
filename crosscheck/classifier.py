@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 import time
 from contextlib import asynccontextmanager
@@ -12,7 +13,7 @@ from pathlib import Path
 from .config import ModelConfig, TaskConfig
 from .cost import cost_of, estimate_tokens
 from .llm import BaseLLM, LLMError
-from .prompts import SYSTEM_PROMPT, build_arbiter_prompt, build_classify_prompt, build_review_prompt
+from .prompts import SYSTEM_PROMPT, build_arbiter_prompt, build_classify_prompt, build_review_prompt, prompt_seed
 
 
 @dataclass
@@ -23,10 +24,16 @@ class Prediction:
     reason: str = ""
     error: str | None = None
     raw: str = ""
+    prob: float | None = None  # 开启 logprobs 时标签的输出概率
 
     @property
     def ok(self) -> bool:
         return self.error is None and self.label is not None
+
+    @property
+    def certainty(self) -> float:
+        """级联判断用的置信度：有 logprobs 用输出概率，否则用模型自报的置信度（本地模型为预测概率）。"""
+        return self.prob if self.prob is not None else self.confidence
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -68,6 +75,31 @@ def _loose_fields(text: str) -> dict | None:
             "reason": reason.group(1) if reason else ""}
 
 
+_LABEL_VALUE_RE = re.compile(r'"label"\s*:\s*"')
+
+
+def label_prob(tokens: list[tuple[str, float]] | None) -> float | None:
+    """输出中 label 字段取值的概率：覆盖取值文字的所有 token 的概率之积。"""
+    if not tokens:
+        return None
+    text = "".join(t for t, _ in tokens)
+    m = None
+    for m in _LABEL_VALUE_RE.finditer(_THINK_RE.sub(lambda x: " " * len(x.group(0)), text)):
+        pass  # 取最后一个，跳过思考内容里可能出现的示例
+    if m is None:
+        return None
+    start = m.end()
+    end = text.find('"', start)
+    if end <= start:
+        return None
+    total, pos = 0.0, 0
+    for tok, lp in tokens:
+        if pos < end and pos + len(tok) > start:
+            total += lp
+        pos += len(tok)
+    return round(math.exp(max(total, -50.0)), 4)
+
+
 def parse_output(raw: str, labels: list[str]) -> tuple[str, float, str]:
     text = _THINK_RE.sub("", raw).strip()
     m = _JSON_RE.search(text)
@@ -104,6 +136,7 @@ class LLMCache:
         self.enabled = enabled
         self.data: dict[str, str] = {}
         self.usage: dict[str, tuple[int, int]] = {}
+        self.probs: dict[str, float] = {}
         self._fh = None
         if enabled and self.path.exists():
             with self.path.open(encoding="utf-8") as f:
@@ -113,21 +146,23 @@ class LLMCache:
                         self.data[rec["key"]] = rec["response"]
                         if rec.get("usage"):
                             self.usage[rec["key"]] = tuple(rec["usage"])
+                        if rec.get("prob") is not None:
+                            self.probs[rec["key"]] = rec["prob"]
                     except (json.JSONDecodeError, KeyError, TypeError):
                         continue
 
     @staticmethod
     def make_key(cfg: ModelConfig, system: str, user: str) -> str:
-        payload = json.dumps(
-            [cfg.provider, cfg.base_url, cfg.model, cfg.temperature, system, user],
-            ensure_ascii=False,
-        )
+        parts = [cfg.provider, cfg.base_url, cfg.model, cfg.temperature, system, user]
+        if cfg.logprobs:
+            parts.append("logprobs")  # 开启前缓存的回复没有概率，不能复用
+        payload = json.dumps(parts, ensure_ascii=False)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def get(self, key: str) -> str | None:
         return self.data.get(key) if self.enabled else None
 
-    def put(self, key: str, response: str, usage: tuple[int, int] | None = None) -> None:
+    def put(self, key: str, response: str, usage: tuple[int, int] | None = None, prob: float | None = None) -> None:
         if not self.enabled:
             return
         self.data[key] = response
@@ -135,6 +170,9 @@ class LLMCache:
         if usage:
             self.usage[key] = usage
             rec["usage"] = list(usage)
+        if prob is not None:
+            self.probs[key] = prob
+            rec["prob"] = prob
         if self._fh is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._fh = self.path.open("a", encoding="utf-8")
@@ -190,22 +228,26 @@ class Classifier:
     def name(self) -> str:
         return self.llm.cfg.name
 
+    def _seed(self, text: str) -> str | None:
+        return prompt_seed(self.task, self.name, text)
+
     async def classify(self, text: str, examples=None) -> Prediction:
-        return await self._call(build_classify_prompt(self.task, text, examples, self.max_chars))
+        return await self._call(build_classify_prompt(self.task, text, examples, self.max_chars, self._seed(text)))
 
     async def review(self, text: str, own: Prediction | None, peers: list[Prediction], examples=None) -> Prediction:
-        return await self._call(build_review_prompt(self.task, text, own, peers, examples, self.max_chars))
+        return await self._call(build_review_prompt(self.task, text, own, peers, examples, self.max_chars, self._seed(text)))
 
     async def arbitrate(self, text: str, opinions: list[Prediction], examples=None) -> Prediction:
-        return await self._call(build_arbiter_prompt(self.task, text, opinions, examples, self.max_chars))
+        return await self._call(build_arbiter_prompt(self.task, text, opinions, examples, self.max_chars, self._seed(text)))
 
     async def _call(self, user: str) -> Prediction:
         cfg = self.llm.cfg
         key = LLMCache.make_key(cfg, SYSTEM_PROMPT, user)
         raw = self.cache.get(key) if self.llm.cacheable else None
         from_cache = raw is not None
-        usage = None
+        usage = prob = None
         if from_cache:
+            prob = self.cache.probs.get(key)
             self.stats["cache_hits"] += 1
             if self.llm.billable:
                 tin, tout = self.cache.usage.get(key) or (estimate_tokens(SYSTEM_PROMPT + user), estimate_tokens(raw))
@@ -219,6 +261,7 @@ class Classifier:
                     self.stats["errors"] += 1
                     return Prediction(self.name, None, error=str(e))
             raw = reply.text
+            prob = label_prob(reply.tokens)
             if self.llm.billable:
                 if reply.in_tokens is None or reply.out_tokens is None:
                     self.stats["estimated_calls"] += 1
@@ -236,5 +279,5 @@ class Classifier:
             return Prediction(self.name, None, error=f"解析失败: {e}", raw=raw)
 
         if self.llm.cacheable and not from_cache:
-            self.cache.put(key, raw, usage)
-        return Prediction(self.name, label, conf, reason, raw=raw)
+            self.cache.put(key, raw, usage, prob)
+        return Prediction(self.name, label, conf, reason, raw=raw, prob=prob)

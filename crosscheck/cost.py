@@ -37,7 +37,7 @@ def estimate_run(config: Config, items: list[dict], disagree_rate: float = 0.25)
     """
     from .classifier import LLMCache
     from .local_model import get_bank
-    from .prompts import SYSTEM_PROMPT, build_arbiter_prompt, build_classify_prompt, build_review_prompt
+    from .prompts import SYSTEM_PROMPT, build_classify_prompt, prompt_seed
 
     pc, fs = config.pipeline, config.fewshot
     cache = LLMCache(config.cache.path, config.cache.enabled)
@@ -59,6 +59,9 @@ def estimate_run(config: Config, items: list[dict], disagree_rate: float = 0.25)
             r = rows[m.name]
             if not r["billable"]:
                 continue
+            if config.task.shuffle_labels:
+                user = build_classify_prompt(config.task, it["text"], ex, fs.max_chars,
+                                             prompt_seed(config.task, m.name, it["text"]))
             if cache.get(LLMCache.make_key(m, SYSTEM_PROMPT, user)) is not None:
                 r["r1_cached"] += 1
             else:

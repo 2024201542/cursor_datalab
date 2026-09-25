@@ -306,7 +306,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
 <div class="bg-glow g1"></div><div class="bg-glow g2"></div><div class="bg-glow g3"></div>
 
 <nav>
-  <a class="logo" href="#top"><span class="logo-mark"></span>CrossCheck <small>v0.2</small></a>
+  <a class="logo" href="#top"><span class="logo-mark"></span>CrossCheck <small>v0.3</small></a>
   <div class="nav-links">
     <a href="#problem">思路</a><a href="#pipeline">流程</a><a href="#arch">架构</a>
     <a href="#exp1">第一次检验</a><a href="#exp2">第二次检验</a><a href="#exp3">改进</a><a href="#insight">发现</a><a href="#platform">平台</a><a href="#roadmap">路线图</a>
@@ -412,7 +412,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
     <div class="arch">
       <div class="layers reveal">
         <div class="layer"><div class="ln">交互层</div><div class="mods"><span class="mod">app.py<em>Streamlit 四页平台</em></span><span class="mod">cli.py<em>classify / evaluate / aggregate / ping</em></span></div></div>
-        <div class="layer"><div class="ln">决策层</div><div class="mods"><span class="mod">pipeline.py<em>六道关卡流水线</em></span><span class="mod">prompts.py<em>首轮 / 复核 / 仲裁</em></span><span class="mod">review.py<em>人工审核与回流</em></span></div></div>
+        <div class="layer"><div class="ln">决策层</div><div class="mods"><span class="mod">pipeline.py<em>六道关卡流水线</em></span><span class="mod">prompts.py<em>首轮 / 复核 / 仲裁</em></span><span class="mod">review.py<em>人工审核与回流</em></span><span class="mod">history.py<em>运行记录 · 多次对比</em></span></div></div>
         <div class="layer"><div class="ln">聚合评估层</div><div class="mods"><span class="mod">aggregate.py<em>加权投票 · Dawid-Skene</em></span><span class="mod">evaluate.py<em>Kappa · 混淆矩阵 · 权重</em></span><span class="mod">report.py<em>图表 · HTML 报告</em></span></div></div>
         <div class="layer"><div class="ln">调用层</div><div class="mods"><span class="mod">llm.py<em>OpenAI 兼容 · Anthropic · 本地 · mock</em></span><span class="mod">local_model.py<em>相似样本检索 · 本地小模型</em></span><span class="mod">classifier.py<em>解析容错 · 缓存 · 限流</em></span></div></div>
         <div class="layer"><div class="ln">配置层</div><div class="mods"><span class="mod">config.yaml</span><span class="mod">configs/*.yaml<em>base 继承</em></span><span class="mod">.env<em>API key 仅本地</em></span></div></div>
@@ -577,6 +577,8 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
         <div class="feat"><span class="n">02</span><div><b>小模型：用人工换准确率</b><span>全自动准确率基本不变，但让“一致”可信得多。代价是人工比例从 22% 升到 43%；“四票至少三票”是折中方案（放行约 90%，准确率约 79%）。</span></div></div>
         <div class="feat"><span class="n">03</span><div><b>FOMC 的上限在标注尺度</b><span>四票全一致仍判错的 21 条中，16 条是金标准为鹰派或鸽派、所有模型都判中性，例如“匈牙利和波兰采用了通胀目标制”被标为鹰派。</span></div></div>
         <div class="feat"><span class="n">04</span><div><b>级联：费用降到 40%</b><span>先只问本地小模型和 DeepSeek，一致就采纳，不一致才问 Kimi 和千问。在 200 条全新股吧帖子上：费用 0.66 元 vs 1.65 元（每千条 3.3 元），人工兜底后准确率 91.0% vs 93.0%，运行前预估误差 4% 以内。</span></div></div>
+        <div class="feat"><span class="n">05</span><div><b>置信度门槛：成本与准确率的旋钮</b><span>在级联上再要求置信度 ≥ 0.8，费用为不级联的 81%，准确率只差 0.2 个百分点。千问、Kimi 的 logprobs 比自报置信度更能区分对错，但只问一个模型、按置信度放行，始终不如两个不同类型的模型互相印证。</span></div></div>
+        <div class="feat"><span class="n">06</span><div><b>选项顺序随机化：没有测到位置偏好</b><span>打乱类别顺序后三个模型准确率变化都在 ±0.6 个百分点内（不显著），选中各位置的比例与真实答案分布一致，默认关闭。</span></div></div>
       </div>
     </div>
   </div>
@@ -672,12 +674,12 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
     <div class="road">
       <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.1</b><h3>基础实现</h3><span class="chip g">已完成</span></div>
         <ul><li class="y">配置驱动</li><li class="y">并行独立分类</li><li class="y">匿名交叉复核</li><li class="y">加权投票 · 仲裁 · 人工兜底</li><li class="y">Kappa · 混淆矩阵 · 自动权重</li><li class="y">Dawid-Skene</li><li class="y">缓存 · 限流 · 重试</li><li class="y">4 家真实模型接入</li></ul></div></div>
-      <div class="ms doing reveal"><div class="card"><div class="hd"><b>v0.2</b><h3>Web 平台</h3><span class="chip c">基础版已完成</span></div>
-        <ul><li class="y">页面配置模型与任务</li><li class="y">上传文件 · 图表结果</li><li class="y">分歧处理策略开关</li><li class="y">人工审核页</li><li>历史运行记录</li><li>多次运行对比</li></ul></div></div>
-      <div class="ms doing reveal"><div class="card"><div class="hd"><b>v0.3</b><h3>成本与稳定性</h3><span class="chip c">主体已完成</span></div>
-        <ul><li class="y">级联调用：本地 + DeepSeek 一致即采纳，费用降到 40%</li><li class="y">断点续跑</li><li class="y">Token 与费用统计</li><li class="y">运行前费用预估 · 预算上限</li><li>置信度级联（logprobs）</li><li>选项顺序随机化</li></ul></div></div>
-      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.4</b><h3>更强的聚合与校准</h3></div>
-        <ul><li>按类别的权重</li><li>置信度校准</li><li>Self-Consistency</li><li>Logprobs 置信度</li><li>动态阈值搜索</li></ul></div></div>
+      <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.2</b><h3>Web 平台</h3><span class="chip g">已完成</span></div>
+        <ul><li class="y">页面配置模型与任务</li><li class="y">上传文件 · 图表结果</li><li class="y">分歧处理策略开关</li><li class="y">人工审核页</li><li class="y">历史运行记录 · 载入配置复现</li><li class="y">多次运行对比 · 显著性检验</li></ul></div></div>
+      <div class="ms done reveal"><div class="card"><div class="hd"><b>v0.3</b><h3>成本与稳定性</h3><span class="chip g">已完成</span></div>
+        <ul><li class="y">级联调用：本地 + DeepSeek 一致即采纳，费用降到 40%</li><li class="y">断点续跑</li><li class="y">Token 与费用统计</li><li class="y">运行前费用预估 · 预算上限</li><li class="y">置信度级联：费用 ↔ 准确率可调</li><li class="y">选项顺序随机化（实测无位置偏好）</li></ul></div></div>
+      <div class="ms doing reveal"><div class="card"><div class="hd"><b>v0.4</b><h3>更强的聚合与校准</h3></div>
+        <ul><li>按类别的权重</li><li>置信度校准</li><li>Self-Consistency</li><li class="y">Logprobs 置信度</li><li>动态阈值搜索</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.5</b><h3>高级协作模式</h3></div>
         <ul><li>多轮辩论</li><li>魔鬼代言人对抗从众</li><li>证据引用</li><li>评审团模式（PoLL）</li><li>多标签 / 层级分类</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.6</b><h3>闭环自进化</h3></div>
