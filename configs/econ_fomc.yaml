@@ -1,0 +1,40 @@
+# 美联储货币政策立场分类（Trillion Dollar Words, ACL 2023）
+# 文本：FOMC 会议纪要、新闻发布会、官员讲话中的句子（英文）
+# 用途：货币经济学——构建货币政策立场指数，研究其对国债收益率、股市、通胀的影响
+# 数据：python scripts/prepare_econ.py  →  data/econ_fomc_gold.csv
+base: ../config.yaml
+
+task:
+  name: FOMC 货币政策鹰鸽分类
+  description: >-
+    给定一句美联储（FOMC）会议纪要、发布会或官员讲话中的英文句子，
+    判断它暗示未来货币政策倾向于收紧（鹰派）、宽松（鸽派），还是中性。每句只能归入一个类别。
+
+  labels:
+    - name: 鹰派
+      definition: 暗示未来货币政策收紧（加息、缩表、减少货币供给）的句子，包括描述经济过热、通胀上升、就业强劲等支持收紧的经济状况。
+      examples:
+        - Business and household spending are increasing at rates consistent with moderate economic growth, though household spending appears to be rising at a somewhat slower pace than earlier this year.
+        - Even as the outlook for real activity has weakened, there have been some important developments on the inflation front.
+    - name: 鸽派
+      definition: 暗示未来货币政策宽松（降息、购债、增加货币供给）的句子，包括描述经济疲弱、失业上升、通胀低迷等支持宽松的经济状况。
+      examples:
+        - We're charged by Congress with trying to pursue maximum employment, and we have taken that very seriously.
+        - Well, if the economy worsens and inflation remains relatively low, then we wouldn't begin to exit, and, therefore, we wouldn't change the language.
+    - name: 中性
+      definition: 不包含明确政策倾向的句子，如经济状况维持不变、观点相互抵消、一般性陈述或与美国货币政策无关的内容。
+      examples:
+        - I mean, we—the—again, the relationship between slack in the economy and inflation is weak, has been weak.
+        - That central bank independence promotes lower inflation in developed countries is well-established by the economic literature.
+
+  rules:
+    - 经济状况：通胀上升、失业下降、增长预期高、产出高于潜在水平、经济松弛（slack）减少 → 鹰派；通胀下降、失业上升、增长预期低 → 鸽派；失业率或增长保持不变 → 中性。
+    - 美元：美元贬值 → 鹰派；美元升值 → 鸽派。能源与房价：上涨 → 鹰派；下跌 → 鸽派。
+    - 对外贸易：美国贸易逆差扩大 → 鹰派；逆差缩小 → 鸽派；只谈其他国家经济或贸易政策 → 中性。
+    - 美联储预期与资产：预期高通胀、国债利差走阔、国债收益率上升 → 鹰派；预期通胀偏弱或通缩、利差收窄、收益率下降 → 鸽派。
+    - 关键词：强调 "accommodative"、"maximum employment" → 鸽派；强调 "price stability" 与 "sustained growth" → 鹰派；"mixed"、"moderate"、"reaffirmed" 等 → 中性。
+    - 劳动生产率上升 → 鸽派；劳动生产率下降 → 鹰派。
+    - 一句话中立场相互抵消（先表态再用 but/however 缓和）时归为"中性"。
+
+mock:
+  keywords: {}

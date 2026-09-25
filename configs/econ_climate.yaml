@@ -1,0 +1,37 @@
+# 年报气候信息披露语调分类（ClimateBERT climate_sentiment）
+# 文本：上市公司年报 / 可持续发展报告中的气候相关段落（英文）
+# 用途：ESG 与气候金融研究——度量企业气候风险暴露、"漂绿"识别、气候风险定价
+# 数据：python scripts/prepare_econ.py  →  data/econ_climate_gold.csv
+base: ../config.yaml
+
+task:
+  name: 年报气候段落语调分类
+  description: >-
+    给定一段摘自上市公司年报或可持续发展报告的气候相关段落（英文），
+    判断这段话把气候变化主要呈现为对公司的"风险"、"机遇"，还是中性陈述。每段只能归入一个类别。
+
+  labels:
+    - name: 风险
+      definition: 段落主要讨论气候变化带来的威胁、负面影响或不确定性，包括物理风险（极端天气、海平面上升）、转型风险（碳税、监管收紧、搁浅资产），以及公司为识别、评估、控制这些风险所做的工作。
+      examples:
+        - We are planning to further define targets and limits so as to ensure that ABN AMRO's vulnerability to climate risks in both the short and longer term remains in line with a moderate risk profile.
+        - Key objectives to address IAG's strategic focus area for disaster risk reduction and climate change are captured and disclosed in its Climate Action Plan and Scorecard, which has five areas of focus.
+    - name: 机遇
+      definition: 段落主要讨论应对气候变化带来的正面机会或成效，如节能减排取得的收益、绿色产品与新业务、低碳转型带来的市场、成本节约、融资与声誉优势。
+      examples:
+        - We did so by replacing less-energy-efficient models with more efficient ones, all compliant with the latest standards of DOE2017 and e-star3, saving approximately 3.2 billion kWh of energy compared to 2015.
+        - S&P Global has developed a suite of products across its underlying business units that help clients in this transition and will continue to invest in innovative solutions that power sustainable markets of the future.
+    - name: 中性
+      definition: 段落只是客观描述气候相关的事实、数据、制度、流程或治理架构，既不突出风险也不突出机遇。
+      examples:
+        - We have reduced carbon-related assets on our balance sheet to 0.8% or USD 1.9 billion as of 31 December 2019, down from 1.6% at the end of 2018 and 2.8% at the end of 2017.
+        - The level of inclusion and control of RI, and by extension climate change factors, will vary by platform. Provided below is a high level look through into each platform's strategy.
+
+  rules:
+    - 以段落的主旨判断，而不是个别词语；出现 "risk" 一词不等于属于"风险"。
+    - 围绕"管理、识别、缓解气候风险"展开的段落归为"风险"。
+    - 围绕减排成效、绿色业务增长、新产品新市场展开的段落归为"机遇"。
+    - 纯粹介绍政策、目标、治理结构、报告口径、统计数据而无明显倾向的归为"中性"。
+
+mock:
+  keywords: {}

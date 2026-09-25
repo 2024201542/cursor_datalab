@@ -216,6 +216,25 @@ python -m crosscheck evaluate data/tnews_gold.csv -c configs/tnews.yaml -o outpu
 
 > TNEWS 数据来自 [CLUE Benchmark](https://github.com/CLUEbenchmark/CLUE)。
 
+### 经济 / 金融文本分类（3 个公开数据集）
+
+```bash
+python scripts/prepare_econ.py      # 下载数据，每类分层抽 50 条测试集，训练集短样本作为提示词示例
+python -m crosscheck evaluate data/econ_climate_gold.csv -c configs/econ_climate.yaml -o output/econ_climate
+python -m crosscheck evaluate data/econ_fomc_gold.csv    -c configs/econ_fomc.yaml    -o output/econ_fomc
+python -m crosscheck evaluate data/econ_finfe_gold.csv   -c configs/econ_finfe.yaml   -o output/econ_finfe
+```
+
+| 任务（经济学领域） | 数据集 | deepseek | kimi | qwen | 多数投票 | 互检系统 | 理论上限 | 首轮一致 / 分歧的准确率 |
+|---|---|---|---|---|---|---|---|---|
+| 年报气候段落：风险/机遇/中性（ESG、气候金融） | [ClimateBERT climate_sentiment](https://huggingface.co/datasets/climatebert/climate_sentiment) | 79.3% | 83.3% | **86.0%** | 84.7% | 83.3% | 92.0% | 91.5% / 53.1% |
+| FOMC 句子：鹰派/鸽派/中性（货币经济学） | [Trillion Dollar Words](https://huggingface.co/datasets/gtfintechlab/fomc_communication) | **65.3%** | 62.0% | 60.7% | 61.3% | 62.0% | 73.3% | 69.6% / 37.1% |
+| 股吧帖子：积极/消极/中性（行为金融、投资者情绪） | [BBT-FinCUGE FinFE](https://github.com/supersymmetry-technologies/BBT-FinCUGE-Applications) | **70.0%** | 68.0% | 67.3% | 68.0% | 68.7% | 79.3% | 75.2% / 45.5% |
+
+结论与 TNEWS 一致：投票不稳定地超过最佳单模型（Kappa 0.76–0.79，错误高度相关），但**首轮一致的约 78% 样本准确率明显更高，分歧的约 22% 是人工复核最该看的部分**。FOMC 的主要错误是把“描述经济强劲”的鹰派句判为中性，这类数据集的标注规则（见 `configs/econ_fomc.yaml`）比常识更严格；FinFE 中有不少反讽和标注噪声（如“今天能涨停算我输”被标为中性）。
+
+> 数据集许可：climate_sentiment 为 CC BY-NC-SA 4.0，Trillion Dollar Words 为 CC BY-NC 4.0，仅用于非商业研究。
+
 ---
 
 ## 项目结构
@@ -224,12 +243,18 @@ python -m crosscheck evaluate data/tnews_gold.csv -c configs/tnews.yaml -o outpu
 ├── app.py                   # Streamlit 网页平台
 ├── config.yaml              # 分类任务、模型、阈值配置（换任务只需改这里）
 ├── configs/
-│   └── tnews.yaml           # 新闻分类任务（base 继承 config.yaml 的模型配置）
+│   ├── tnews.yaml           # 新闻分类任务（base 继承 config.yaml 的模型配置）
+│   ├── econ_climate.yaml    # 年报气候段落 风险/机遇/中性
+│   ├── econ_fomc.yaml       # FOMC 货币政策 鹰派/鸽派/中性
+│   └── econ_finfe.yaml      # 股吧帖子情绪 积极/消极/中性
+├── scripts/
+│   └── prepare_econ.py      # 下载经济金融数据集并生成金标准
 ├── .env                     # API key（自行创建，不上传）
 ├── requirements.txt
 ├── data/
 │   ├── gold.csv             # 客服消息金标准（60 条）
 │   ├── tnews_gold.csv       # TNEWS 新闻标题金标准（150 条）
+│   ├── econ_*_gold.csv      # 三个经济金融数据集金标准（各 150 条）
 │   └── sample.csv           # 示例待分类数据
 └── crosscheck/
     ├── cli.py               # 命令行入口
