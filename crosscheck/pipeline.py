@@ -11,7 +11,7 @@ import httpx
 from .aggregate import weighted_vote
 from .classifier import Classifier, LLMCache, Prediction
 from .config import Config
-from .llm import create_llm
+from .llm import LLMError, create_llm
 from .local_model import get_bank
 
 STATUS_CONSENSUS = "consensus"
@@ -75,7 +75,10 @@ class CrossCheckPipeline:
         try:
             fs = self.config.fewshot
             if fs.enabled:
-                self.bank = get_bank(fs.path, tuple(self.config.task.label_names), fs.text_col, fs.label_col)
+                try:
+                    self.bank = get_bank(fs.path, tuple(self.config.task.label_names), fs.text_col, fs.label_col)
+                except (OSError, ValueError, ImportError) as e:
+                    raise LLMError(f"动态示例无法读取训练数据 {fs.path}：{e}") from e
             sem = asyncio.Semaphore(pc.concurrency)
             self.classifiers = [
                 Classifier(self.config.task, create_llm(m, self._http, self.config), self.cache, sem, fs.max_chars)

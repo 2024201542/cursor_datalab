@@ -170,7 +170,10 @@ class LocalLLM(BaseLLM):
 
         fs = config.fewshot
         path = cfg.train_path or fs.path
-        self.clf = get_classifier(str(path), tuple(config.task.label_names), fs.text_col, fs.label_col)
+        try:
+            self.clf = get_classifier(str(path), tuple(config.task.label_names), fs.text_col, fs.label_col)
+        except (OSError, ValueError, ImportError) as e:
+            raise LLMError(f"本地模型 {cfg.name} 无法用训练数据 {path} 训练：{e}") from e
 
     async def chat(self, system: str, user: str) -> str:
         m = _TEXT_RE.search(user)

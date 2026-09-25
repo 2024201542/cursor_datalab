@@ -8,6 +8,7 @@ import io
 import json
 import math
 import os
+import re
 import time
 from dataclasses import MISSING, fields
 from datetime import datetime
@@ -30,6 +31,7 @@ from crosscheck.config import (
 from crosscheck.evaluate import evaluate
 from crosscheck.io_utils import write_results
 from crosscheck.llm import LLMError, create_llm
+from crosscheck.local_model import save_examples
 from crosscheck.pipeline import STATUS_HUMAN, STATUS_TEXT, CrossCheckPipeline
 from crosscheck.prompts import build_classify_prompt
 from crosscheck.review import (
@@ -188,6 +190,27 @@ def read_upload(file) -> pd.DataFrame:
     raise ValueError("无法识别文件编码，请另存为 UTF-8")
 
 
+@st.cache_data(show_spinner=False)
+def read_training(path: str, stamp: int) -> pd.DataFrame:
+    """stamp 是文件修改时间，只用于让缓存在文件变化后失效。"""
+    buf = io.BytesIO(Path(path).read_bytes())
+    buf.name = path
+    df = read_upload(buf)
+    df.columns = [str(c) for c in df.columns]
+    return df
+
+
+def training_df(fs: dict) -> pd.DataFrame | None:
+    path = str(fs.get("path") or "")
+    if not path or not Path(path).exists():
+        return None
+    return read_training(path, Path(path).stat().st_mtime_ns)
+
+
+def guess_col(cols: list[str], names: set[str], fallback: str) -> str:
+    return next((c for c in cols if c.lower() in names), fallback)
+
+
 # ---------------------------------------------------------------- 页面
 if "raw" not in st.session_state:
     load_into_state("config.yaml")
@@ -210,12 +233,14 @@ with st.sidebar:
 raw = st.session_state.raw
 ver = st.session_state.ver
 config_error = None
-tab_models, tab_task, tab_run, tab_review = st.tabs(["① 模型配置", "② 分类任务", "③ 运行与结果", "④ 人工审核"])
+tab_models, tab_task, tab_train, tab_run, tab_review = st.tabs(
+    ["① 模型配置", "② 分类任务", "③ 训练数据（可选）", "④ 运行与结果", "⑤ 人工审核"])
 
 # ---------------- ① 模型配置
 with tab_models:
     st.subheader("参与互检的模型")
-    st.caption("建议 3 个来自不同厂商的“投票”模型 + 1 个“仲裁”模型。接口类型：openai = 任何 OpenAI 兼容接口（DeepSeek / 百炼 / Kimi / 大部分中转站）。")
+    st.caption("建议 3 个来自不同厂商的“投票”模型 + 1 个“仲裁”模型。接口类型：openai = 任何 OpenAI 兼容接口（DeepSeek / 百炼 / Kimi / 大部分中转站）；"
+               "local = 用训练数据训练的本地小模型，在“③ 训练数据”页一键添加。")
     edited_models = st.data_editor(
         st.session_state.models_df, key=f"models_editor_{ver}", num_rows="dynamic", width="stretch",
         column_config={
@@ -281,6 +306,163 @@ with tab_task:
         except ValueError as e:
             st.warning(str(e))
 
+# ---------------- ③ 训练数据（可选）
+with tab_train:
+    label_names = [lab["name"] for lab in raw["task"].get("labels") or []]
+    fs = raw.get("fewshot") or {}
+    tpath = str(fs.get("path") or "")
+    tcol, lcol = fs.get("text_col", "text"), fs.get("label_col", "label")
+    st.info(
+        "**没有训练数据也可以直接使用**：模型只按“② 分类任务”页的类别定义和边界规则判断，本页可以跳过。\n\n"
+        "如果手上有同类数据的已标注样本（历史人工标注、公开数据集的训练集、人工审核过的结果），加入后可以开启两项增强：\n"
+        "- **动态示例**：每条待分类文本自动附上训练数据中最相似的几条已标注样本，让模型学到这批数据的标注尺度；\n"
+        "- **本地小模型**：用训练数据训练一个分类器作为额外一票，它和大模型的出错方式不同，“全票一致”更可信。\n\n"
+        "两项都在本机运行，不额外调用 API。"
+    )
+
+    st.subheader("当前训练数据")
+    tdf = training_df(fs)
+    if tdf is not None and {tcol, lcol} - set(tdf.columns):
+        st.error(f"{tpath} 缺少 {tcol} / {lcol} 列，无法使用")
+        tdf = None
+    if not tpath:
+        st.caption("未使用训练数据。")
+    elif tdf is None and not Path(tpath).exists():
+        st.warning(f"配置中的训练数据文件 {tpath} 不存在，可以在下方重新加入。")
+    if tdf is not None:
+        counts = tdf[lcol].astype(str).str.strip().value_counts()
+        known = counts[counts.index.isin(label_names)]
+        c = st.columns(3)
+        c[0].metric("样本数", len(tdf))
+        c[1].metric("可用样本（标签属于当前类别）", int(known.sum()))
+        c[2].metric("覆盖类别", f"{len(known)} / {len(label_names)}")
+        st.caption(f"文件：{tpath}")
+        unknown = counts[~counts.index.isin(label_names)]
+        if len(unknown):
+            st.warning(f"{int(unknown.sum())} 条样本的标签不在当前类别中（如 {list(unknown.index[:6])}），使用时会被忽略。")
+        missing = [lab for lab in label_names if lab not in counts.index]
+        if missing:
+            st.warning(f"这些类别没有训练样本：{missing}")
+        few = [lab for lab in label_names if 0 < counts.get(lab, 0) < 30]
+        if few:
+            st.caption(f"样本较少（< 30 条）的类别：{few}。动态示例仍然有用，本地小模型在这些类别上会不太准。")
+        st.bar_chart(known.reindex(label_names).fillna(0), horizontal=True)
+        with st.expander("预览训练数据"):
+            st.dataframe(tdf[[tcol, lcol]].head(200), hide_index=True, width="stretch")
+
+    st.subheader("加入训练数据")
+    tv = st.session_state.setdefault("train_ver", 0)
+    how = st.radio("方式", ["上传文件", "手动录入"], horizontal=True, key="train_how")
+    new_texts, new_labels = [], []
+    if how == "上传文件":
+        tf = st.file_uploader("上传已标注数据（CSV / Excel / JSONL，需要有文本列和标签列）",
+                              type=["csv", "xlsx", "xls", "jsonl"], key=f"train_up_{tv}")
+        if tf is not None:
+            try:
+                udf = read_upload(tf)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"读取失败：{e}")
+                udf = None
+            if udf is not None:
+                ucols = [str(c) for c in udf.columns]
+                udf.columns = ucols
+                c1, c2 = st.columns(2)
+                utc = c1.selectbox("文本列", ucols, key="train_tc",
+                                   index=ucols.index(guess_col(ucols, {"text", "文本", "内容", "sentence"}, ucols[0])))
+                ulc = c2.selectbox("标签列", ucols, key="train_lc",
+                                   index=ucols.index(guess_col(ucols, {"label", "标签", "类别"}, ucols[-1])))
+                new_texts, new_labels = list(udf[utc]), list(udf[ulc])
+    else:
+        st.caption("在表格中逐行填写，点表格下方的“+”增加一行；也可以从 Excel 复制两列直接粘贴进来。")
+        manual = st.data_editor(
+            pd.DataFrame({"文本": pd.Series(dtype=str), "标签": pd.Series(dtype=str)}),
+            key=f"train_manual_{tv}", num_rows="dynamic", width="stretch",
+            column_config={"文本": st.column_config.TextColumn(width="large"),
+                           "标签": st.column_config.SelectboxColumn(options=label_names)},
+        )
+        new_texts, new_labels = list(manual["文本"]), list(manual["标签"])
+
+    pairs = [(str(_clean(t, "")).strip(), str(_clean(y, "")).strip()) for t, y in zip(new_texts, new_labels)]
+    pairs = [(t, y) for t, y in pairs if t and y]
+    good = [(t, y) for t, y in pairs if y in label_names]
+    bad_labels = sorted({y for _, y in pairs if y not in label_names})
+    if pairs:
+        msg = f"可加入 {len(good)} 条"
+        if bad_labels:
+            msg += f"；{len(pairs) - len(good)} 条的标签不在当前类别中，将被跳过：{bad_labels[:8]}"
+        (st.warning if bad_labels else st.caption)(msg)
+
+    slug = re.sub(r'[\\/:*?"<>|\s]+', "_", str(raw["task"].get("name") or "")).strip("_") or "task"
+    c1, c2 = st.columns([2, 1])
+    target = c1.text_input("保存到", value=tpath if tpath.lower().endswith(".csv") else f"data/train/{slug}.csv",
+                           key=f"train_target_{ver}_{tv}")
+    exists = Path(target).exists()
+    replace = c2.radio("写入方式", ["追加（按文本去重）", "替换原有数据"], key="train_mode",
+                       disabled=not exists) == "替换原有数据" and exists
+    if st.button("💾 保存训练数据", type="primary", disabled=not good):
+        try:
+            added, skipped = save_examples(target, [t for t, _ in good], [y for _, y in good], append=not replace)
+        except (OSError, ValueError) as e:
+            st.error(str(e))
+        else:
+            fs = {k: v for k, v in fs.items() if k not in ("text_col", "label_col")}
+            raw["fewshot"] = {**fs, "path": target, "k": int(fs.get("k") or 6)}
+            st.session_state.train_ver = tv + 1
+            st.session_state.train_msg = (f"已{'替换' if replace else '写入'} {target}：新增 {added} 条"
+                                          + (f"，重复跳过 {skipped} 条" if skipped else "")
+                                          + "。已自动开启动态示例；需要长期保留时请在左侧保存配置。")
+            st.rerun()
+    if st.session_state.get("train_msg"):
+        st.success(st.session_state.pop("train_msg"))
+
+    st.subheader("使用方式")
+    has_data = tdf is not None
+    fs = raw.get("fewshot") or {}
+    if not has_data:
+        st.caption("加入训练数据后才能开启下面两项。")
+    c1, c2, c3 = st.columns([2, 1, 1])
+    use_fs = c1.toggle("动态示例：提示词里附上最相似的已标注样本", value=has_data and int(fs.get("k", 6)) > 0,
+                       disabled=not has_data, key=f"use_fs_{tv}_{has_data}")
+    k = c2.number_input("每条附几个示例", min_value=1, max_value=20, value=int(fs.get("k") or 6), disabled=not use_fs,
+                        key=f"fs_k_{tv}")
+    max_chars = c3.number_input("每个示例最多字符", min_value=50, max_value=2000, step=50,
+                                value=int(fs.get("max_chars", 300)), disabled=not use_fs, key=f"fs_mc_{tv}")
+    if tpath:
+        raw["fewshot"] = {**fs, "k": int(k) if use_fs else 0, "max_chars": int(max_chars)}
+
+    has_local = any(m.get("provider") == "local" for m in raw.get("models") or [])
+    use_local = st.toggle(
+        "本地小模型：用训练数据训练一个分类器（TF-IDF + 逻辑回归）作为额外一票", value=has_local,
+        disabled=not (has_data or has_local), key=f"use_local_{ver}_{has_local}",
+        help="建议每个类别至少 30 条样本。开启后首轮需要全部投票者一致才自动通过，自动通过的样本更准，但转人工的会变多。",
+    )
+    if use_local != has_local:
+        if use_local:
+            names = {m["name"] for m in raw["models"]}
+            raw["models"].append({"name": next(n for n in ("local", "local2", "local3") if n not in names), "provider": "local"})
+        else:
+            raw["models"] = [m for m in raw["models"] if m.get("provider") != "local"]
+        st.session_state.models_df = models_to_df(raw)
+        st.session_state.labels_df = labels_to_df(raw)
+        st.session_state.ver = ver + 1
+        st.rerun()
+    if has_local and not has_data and not all(m.get("train_path") for m in raw["models"] if m.get("provider") == "local"):
+        st.error("模型列表中有本地小模型，但没有可用的训练数据，运行会失败。请加入训练数据，或关闭上面的开关。")
+
+    if has_data:
+        with st.expander("🔎 试一试：输入一段文本，看看会检索到哪些示例、本地小模型怎么判"):
+            q = st.text_area("文本", key="train_try", height=80).strip()
+            if q:
+                from crosscheck.local_model import get_bank, get_classifier
+                try:
+                    with st.spinner("正在加载训练数据…"):
+                        ex = get_bank(tpath, tuple(label_names), tcol, lcol).nearest(q, int(k))
+                        pred, prob = get_classifier(tpath, tuple(label_names), tcol, lcol).predict(q)
+                    st.markdown(f"本地小模型判断：**{pred}**（概率 {prob:.2f}）")
+                    st.dataframe(pd.DataFrame(ex, columns=["最相似的已标注样本", "标签"]), hide_index=True, width="stretch")
+                except (OSError, ValueError, ImportError) as e:
+                    st.error(str(e))
+
 if save_clicked:
     if config_error:
         st.sidebar.error("配置有误，未保存")
@@ -323,7 +505,7 @@ with tab_run:
         p = raw.get("pipeline") or {}
         c1, c2, c3, c4 = st.columns(4)
         actions = list(DISAGREEMENT_ACTIONS)
-        action = c1.selectbox("首轮出现分歧时", actions, index=actions.index(p.get("disagreement_action", "review")),
+        action = c1.selectbox("首轮出现分歧时", actions, index=actions.index(p.get("disagreement_action", "human")),
                               format_func=DISAGREEMENT_ACTIONS.get)
         accept = c2.slider("复核后自动采纳阈值", 0.5, 1.0, float(p.get("accept_threshold", 0.6)), 0.05,
                            help="过半模型同意且加权得票占比 ≥ 该值时自动采纳", disabled=action != "review")
@@ -350,6 +532,22 @@ with tab_run:
             items.append(item)
         if bad:
             st.error(f"标签列中有配置里不存在的类别：{sorted(bad)}。请在“分类任务”页添加这些类别，或检查标签列是否选对。")
+
+        fs_now = raw.get("fewshot") or {}
+        tdf_now = training_df(fs_now)
+        fs_on = tdf_now is not None and int(fs_now.get("k", 6)) > 0
+        local_on = any(m.get("provider") == "local" and m.get("enabled", True) for m in raw.get("models") or [])
+        if fs_on or local_on:
+            st.caption(f"训练数据：{fs_now.get('path', '（本地模型自带）')}　·　动态示例 {'开' if fs_on else '关'}"
+                       f"　·　本地小模型 {'开' if local_on else '关'}（在“③ 训练数据”页修改）")
+        else:
+            st.caption("未使用训练数据：模型只按分类任务中的定义和规则判断。")
+        if tdf_now is not None and label_col != "（无，只做分类）" and fs_now.get("text_col", "text") in tdf_now.columns:
+            seen_texts = set(tdf_now[fs_now.get("text_col", "text")].astype(str).str.strip())
+            overlap = sum(it["text"] in seen_texts for it in items)
+            if overlap:
+                st.warning(f"有 {overlap} 条待评估样本也在训练数据中。动态示例会自动跳过完全相同的文本，"
+                           "但本地小模型已经见过这些答案，评估出的准确率会偏高。评估时建议用不在训练数据里的样本。")
 
         if st.button(f"🚀 开始运行（{len(items)} 条）", type="primary", disabled=bool(bad or config_error) or not items):
             run_raw = copy.deepcopy(raw)
@@ -466,7 +664,7 @@ with tab_run:
             c[3].download_button("⬇ 图表报告 HTML", paths["html"].read_bytes(), "report.html", width="stretch")
         n_human = sum(r.status == STATUS_HUMAN for r in results)
         if n_human:
-            st.info(f"有 {n_human} 条需要人工审核，可到“④ 人工审核”页逐条处理。")
+            st.info(f"有 {n_human} 条需要人工审核，可到“⑤ 人工审核”页逐条处理。")
         with st.expander("模型调用统计"):
             st.dataframe(pd.DataFrame([{"模型": k, "实际请求": v["calls"], "缓存命中": v["cache_hits"], "失败": v["errors"]}
                                        for k, v in last["stats"].items()]), hide_index=True)
@@ -476,7 +674,7 @@ with tab_run:
 with tab_review:
     runs = [p.as_posix() for p in list_runs()]
     if not runs:
-        st.info("还没有运行结果。先在“③ 运行与结果”页运行一次。")
+        st.info("还没有运行结果。先在“④ 运行与结果”页运行一次。")
         st.stop()
 
     last = st.session_state.get("last")
@@ -639,14 +837,17 @@ with tab_review:
     c1.download_button("⬇ 下载最终结果（合并人工审核）", merged.to_csv(index=False).encode("utf-8-sig"),
                        f"{Path(run_path).stem}_final.csv", width="stretch")
     with c2:
-        golds = sorted(p.as_posix() for p in Path("data").glob("*.csv"))
-        target = st.selectbox("加入到金标准文件", golds + ["（新建文件）"],
-                              index=len(golds) if golds else 0)
+        golds = sorted(p.as_posix() for p in Path("data").glob("**/*.csv"))
+        train_path = (raw.get("fewshot") or {}).get("path", "")
+        default = golds.index(train_path) if train_path in golds else len(golds)
+        target = st.selectbox("加入到金标准 / 训练数据文件", golds + ["（新建文件）"], index=default,
+                              help="选当前的训练数据文件，之后分类时就会参考这些人工确认过的样本")
         if target == "（新建文件）":
             target = st.text_input("新文件路径", value="data/gold_reviewed.csv")
         if st.button("📥 把已审核样本加入金标准", disabled=not stats["n"], width="stretch"):
             try:
                 added, skipped = append_to_gold(records, reviews, target)
-                st.success(f"已写入 {target}：新增 {added} 条，重复跳过 {skipped} 条。之后可以在“③ 运行与结果”页用它评估。")
+                st.success(f"已写入 {target}：新增 {added} 条，重复跳过 {skipped} 条。"
+                           "金标准可在“④ 运行与结果”页用来评估；训练数据文件会在下次分类时自动生效。")
             except ValueError as e:
                 st.error(str(e))

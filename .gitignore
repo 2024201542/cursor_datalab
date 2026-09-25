@@ -2,3 +2,5 @@ __pycache__/
 .cache/
 output/
 .env
+# 网页“训练数据”页保存的自有数据，默认不上传
+data/train/

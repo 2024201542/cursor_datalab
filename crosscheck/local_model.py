@@ -68,6 +68,9 @@ class TextClassifier:
         from sklearn.linear_model import LogisticRegression
         from sklearn.pipeline import make_pipeline, make_union
 
+        if len(set(labels)) < 2:
+            raise ValueError("本地小模型至少需要 2 个类别的训练样本")
+
         features = make_union(
             TfidfVectorizer(analyzer="word", ngram_range=(1, 2), sublinear_tf=True, min_df=1),
             _char_vectorizer(),
@@ -81,11 +84,56 @@ class TextClassifier:
         return str(self.model.classes_[i]), float(probs[i])
 
 
+def save_examples(path: str | Path, texts: list[str], labels: list[str], append: bool = True) -> tuple[int, int]:
+    """写入 text,label 两列的训练集 csv，按文本去重。append=False 时覆盖原文件。返回 (新增条数, 重复跳过条数)。"""
+    import csv
+
+    path = Path(path)
+    if path.suffix.lower() != ".csv":
+        raise ValueError("训练数据文件必须是 .csv")
+    rows: list[dict] = []
+    if append and path.exists():
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            rows = [{"text": r.get("text", ""), "label": r.get("label", "")} for r in csv.DictReader(f)]
+    seen = {r["text"].strip() for r in rows}
+    added = skipped = 0
+    for t, y in zip(texts, labels):
+        t, y = str(t).strip(), str(y).strip()
+        if not t or not y:
+            continue
+        if t in seen:
+            skipped += 1
+            continue
+        rows.append({"text": t, "label": y})
+        seen.add(t)
+        added += 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["text", "label"])
+        w.writeheader()
+        w.writerows(rows)
+    return added, skipped
+
+
+def _stamp(path: str) -> int:
+    p = Path(path)
+    return p.stat().st_mtime_ns if p.exists() else 0
+
+
+# 缓存键包含文件修改时间：训练数据被追加或替换后自动重新加载
+def get_bank(path: str, labels: tuple[str, ...], text_col: str = "text", label_col: str = "label") -> ExampleBank:
+    return _bank(path, _stamp(path), labels, text_col, label_col)
+
+
+def get_classifier(path: str, labels: tuple[str, ...], text_col: str = "text", label_col: str = "label") -> TextClassifier:
+    return _classifier(path, _stamp(path), labels, text_col, label_col)
+
+
 @lru_cache(maxsize=8)
-def get_bank(path: str, labels: tuple[str, ...], text_col: str, label_col: str) -> ExampleBank:
+def _bank(path, stamp, labels, text_col, label_col) -> ExampleBank:
     return ExampleBank(*load_examples(path, list(labels), text_col, label_col))
 
 
 @lru_cache(maxsize=8)
-def get_classifier(path: str, labels: tuple[str, ...], text_col: str, label_col: str) -> TextClassifier:
+def _classifier(path, stamp, labels, text_col, label_col) -> TextClassifier:
     return TextClassifier(*load_examples(path, list(labels), text_col, label_col))
