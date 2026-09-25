@@ -120,7 +120,12 @@ arbiter:
 pipeline:
   concurrency: 8            # 同时进行的 API 请求数上限
   min_votes: 2              # 至少需要几个模型给出有效结果才能自动采纳
-  cross_review: true        # 出现分歧时是否进行交叉复核
+  # 首轮出现分歧时怎么处理：
+  #   review  -> 交叉复核后投票，仍不通过再仲裁（默认）
+  #   arbiter -> 跳过复核，直接交给仲裁模型（实测：复核容易“从众收敛”到错误答案时推荐）
+  #   human   -> 直接转人工审核（对准确率要求极高时推荐）
+  disagreement_action: review
+  cross_review: true        # 出现分歧时是否进行交叉复核（仅 review 策略生效）
   accept_threshold: 0.6     # 复核后：过半模型同意 且 加权得票占比 >= 该值 -> 自动采纳
   use_arbiter: true         # 复核后仍未通过时，是否交给仲裁模型
   arbiter_threshold: 0.7    # 仲裁模型置信度 >= 该值才采纳，否则转人工

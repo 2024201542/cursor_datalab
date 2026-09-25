@@ -52,16 +52,35 @@ flowchart TD
 pip install -r requirements.txt
 ```
 
-依赖只有 `httpx` 和 `pyyaml`，Python 3.10+。
+Python 3.10+。
 
-### 2. 用 mock 模式跑通流程（不需要 API key）
+### 2. 网页平台（推荐）
+
+```bash
+streamlit run app.py
+```
+
+浏览器打开 <http://localhost:8501>，三个页面：
+
+| 页面 | 功能 |
+|---|---|
+| ① 模型配置 | 表格编辑模型（投票 / 仲裁、接口地址、模型名、限流、额外参数），填写 API Key（保存到本地 `.env`），一键测试连通性 |
+| ② 分类任务 | 编辑类别定义、正反例、边界规则，预览发给模型的提示词 |
+| ③ 运行与结果 | 上传 CSV / Excel / JSONL（或选 `data/` 目录里的文件），选择文本列和标签列，设置分歧策略与阈值后运行 |
+
+- **有标签列**：显示每个模型、多数投票、加权投票、互检系统的准确率卡片和对比表，5 张图表，逐条明细（判错标红）
+- **无标签列**：显示模型两两一致率、各模型的类别分布、逐条结果
+- 可下载结果 CSV、待人工审核 CSV、完整明细 JSONL、图表报告 HTML（单文件，图片已内嵌）
+- 侧边栏可切换 / 保存配置文件
+
+### 3. 命令行：用 mock 模式跑通流程（不需要 API key）
 
 ```bash
 python -m crosscheck classify data/sample.csv --mock
 python -m crosscheck evaluate data/gold.csv --mock
 ```
 
-### 3. 接入真实模型
+### 4. 接入真实模型
 
 在项目根目录新建 `.env` 文件写入 key（已被 `.gitignore` 忽略，不会上传），程序启动时自动加载：
 
@@ -91,7 +110,7 @@ python -m crosscheck ping      # 逐个测试模型是否可用
 | `anthropic` | Anthropic 原生 `/v1/messages` 接口 |
 | `mock` | 假模型，用于测试 |
 
-### 4. 推荐的使用顺序
+### 5. 命令行推荐的使用顺序
 
 ```bash
 # ① 在人工标注的金标准上评估，生成模型权重 output/weights.json
@@ -193,6 +212,7 @@ python -m crosscheck evaluate data/tnews_gold.csv -c configs/tnews.yaml -o outpu
 ## 项目结构
 
 ```
+├── app.py                   # Streamlit 网页平台
 ├── config.yaml              # 分类任务、模型、阈值配置（换任务只需改这里）
 ├── configs/
 │   └── tnews.yaml           # 新闻分类任务（base 继承 config.yaml 的模型配置）
@@ -232,16 +252,18 @@ python -m crosscheck evaluate data/tnews_gold.csv -c configs/tnews.yaml -o outpu
 - [x] 评估报告：单模型 vs 多数投票 vs 加权投票 vs 互检系统 准确率对比图、分类别对比、复核效果、混淆矩阵、HTML 报告
 - [x] 配置继承（`base`），同一套模型配置复用于多个分类任务
 
-### 🌐 v0.2 Web 平台（下一步）
+### 🌐 v0.2 Web 平台（基础版已完成）
 
 目标：不写命令也能用，上传文件即可得到带图表的结果。
 
-- [ ] 在页面上配置模型：填写 API key / 接口地址 / 模型名，一键测试连通性
-- [ ] 在页面上编辑分类任务：类别、定义、正反例、边界规则
-- [ ] 上传 CSV / Excel，选择文本列和标签列，实时显示进度
-- [ ] 结果页：各模型准确率与投票准确率对比图、分类别对比、分歧样本列表，支持下载结果
+- [x] 在页面上配置模型：填写 API key / 接口地址 / 模型名，一键测试连通性
+- [x] 在页面上编辑分类任务：类别、定义、正反例、边界规则
+- [x] 上传 CSV / Excel，选择文本列和标签列，实时显示进度
+- [x] 结果页：各模型准确率与投票准确率对比图、分类别对比、分歧样本列表，支持下载结果
+- [x] 按实测结论新增策略开关：“首轮不一致即直接仲裁 / 转人工”（`pipeline.disagreement_action`）
 - [ ] 人工审核页：逐条处理“需人工审核”样本，结果回流为金标准
-- [ ] 按实测结论新增策略开关：“首轮不一致即转人工 / 仲裁”
+- [ ] 历史运行记录：查看、对比多次运行的结果
+- [ ] 多次运行对比：同一份数据换模型 / 换策略后的准确率变化
 
 ### 🚧 v0.3 成本与稳定性
 

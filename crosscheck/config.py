@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -7,6 +8,11 @@ from pathlib import Path
 import yaml
 
 PROVIDERS = ("openai", "anthropic", "mock")
+DISAGREEMENT_ACTIONS = {
+    "review": "交叉复核后投票，仍不通过再仲裁",
+    "arbiter": "跳过复核，直接交给仲裁模型",
+    "human": "直接转人工审核",
+}
 
 
 @dataclass
@@ -60,6 +66,7 @@ class ModelConfig:
 class PipelineConfig:
     concurrency: int = 8
     min_votes: int = 2
+    disagreement_action: str = "review"
     cross_review: bool = True
     accept_threshold: float = 0.6
     use_arbiter: bool = True
@@ -108,17 +115,41 @@ def _build(cls, data: dict, where: str):
     return cls(**data)
 
 
-def _read_yaml(path: Path) -> dict:
+def save_dotenv(updates: dict[str, str], path: str | Path = ".env") -> None:
+    """更新或追加 .env 中的键值，同时写入当前进程的环境变量。"""
+    p = Path(path)
+    lines = p.read_text(encoding="utf-8-sig").splitlines() if p.exists() else []
+    remaining = dict(updates)
+    for i, line in enumerate(lines):
+        key = line.split("=", 1)[0].strip()
+        if "=" in line and key in remaining:
+            lines[i] = f"{key}={remaining.pop(key)}"
+    lines += [f"{k}={v}" for k, v in remaining.items()]
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.environ.update(updates)
+
+
+def read_raw_config(path: str | Path) -> dict:
     """读取 yaml；若含 base 字段，则以 base 指向的配置为底，当前文件的顶层字段覆盖之。"""
+    path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     base = raw.pop("base", None)
     if base:
-        return {**_read_yaml((path.parent / base).resolve()), **raw}
+        return {**read_raw_config((path.parent / base).resolve()), **raw}
     return raw
 
 
+def save_config(raw: dict, path: str | Path) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
 def load_config(path: str | Path, mock: bool = False) -> Config:
-    raw = _read_yaml(Path(path))
+    return config_from_dict(read_raw_config(path), mock=mock)
+
+
+def config_from_dict(raw: dict, mock: bool = False) -> Config:
+    raw = copy.deepcopy(raw)
 
     t = raw.get("task") or {}
     task = TaskConfig(
@@ -180,3 +211,5 @@ def _validate(config: Config) -> None:
     pc = config.pipeline
     if pc.min_votes < 1 or pc.concurrency < 1:
         raise ValueError("pipeline.min_votes 和 pipeline.concurrency 必须 >= 1")
+    if pc.disagreement_action not in DISAGREEMENT_ACTIONS:
+        raise ValueError(f"pipeline.disagreement_action 必须是 {list(DISAGREEMENT_ACTIONS)} 之一")

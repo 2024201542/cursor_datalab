@@ -1,6 +1,7 @@
 """把 evaluate 的结果画成图，并生成一份可直接用浏览器打开的 HTML 报告。"""
 from __future__ import annotations
 
+import base64
 import html
 from pathlib import Path
 
@@ -141,6 +142,10 @@ CHARTS = [
 ]
 
 
+def _b64(path: Path) -> str:
+    return base64.b64encode(path.read_bytes()).decode("ascii")
+
+
 def build_report(rep: dict, out_dir: str | Path) -> Path:
     out = Path(out_dir)
     chart_dir = out / "charts"
@@ -196,7 +201,7 @@ img{{max-width:100%;border:1px solid #eee;border-radius:8px;margin:8px 0 20px}}
 <h2>准确率对比</h2>
 <table><tr><th>类型</th><th>方案</th><th>整体准确率</th>{''.join(f'<th>{esc(l)}</th>' for l in rep['labels'])}</tr>{acc_rows}
 <tr><td>参考</td><td>任一模型答对（理论上限）</td><td>{pct(rep['any_correct'])}</td>{'<td></td>' * len(rep['labels'])}</tr></table>
-{''.join(f'<h2>{title}</h2><img src="charts/{fname}">' for fname, title, _ in CHARTS)}
+{''.join(f'<h2>{title}</h2><img src="data:image/png;base64,{_b64(chart_dir / fname)}">' for fname, title, _ in CHARTS)}
 <h2>逐条明细（红色为判错）</h2>
 <table><tr><th>ID</th><th>文本</th><th>真实</th>{''.join(f'<th>{esc(n)}</th>' for n in names)}<th>处理环节</th></tr>
 {''.join(item_rows)}</table>
