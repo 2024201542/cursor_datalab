@@ -53,6 +53,8 @@ class ModelConfig:
     rpm: int = 0
     mock_accuracy: float = 0.8
     train_path: str = ""  # provider=local 时的训练集；留空则用 fewshot.path
+    price_in: float = 0.0   # 输入单价，元 / 百万 token；0 表示未设置，只统计 token 不算费用
+    price_out: float = 0.0  # 输出单价，元 / 百万 token
     enabled: bool = True
 
     def resolve_api_key(self) -> str:
@@ -67,7 +69,9 @@ class ModelConfig:
 class PipelineConfig:
     concurrency: int = 8
     min_votes: int = 2
-    disagreement_action: str = "review"
+    # 级联：首轮先只调用这些模型（按名称），它们全部给出有效且一致的结果就直接采纳，不再调用其余模型
+    cascade: list[str] = field(default_factory=list)
+    disagreement_action: str = "human"
     cross_review: bool = True
     accept_threshold: float = 0.6
     use_arbiter: bool = True
@@ -235,3 +239,9 @@ def _validate(config: Config) -> None:
         raise ValueError("pipeline.min_votes 和 pipeline.concurrency 必须 >= 1")
     if pc.disagreement_action not in DISAGREEMENT_ACTIONS:
         raise ValueError(f"pipeline.disagreement_action 必须是 {list(DISAGREEMENT_ACTIONS)} 之一")
+    if pc.cascade:
+        missing = [n for n in pc.cascade if n not in model_names]
+        if missing:
+            raise ValueError(f"pipeline.cascade 中的模型不存在或未启用: {missing}")
+        if len(set(pc.cascade)) < 2 or len(set(pc.cascade)) >= len(model_names):
+            raise ValueError("pipeline.cascade 至少要有 2 个模型，且要少于全部投票模型，否则级联没有意义")

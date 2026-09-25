@@ -31,6 +31,7 @@ from crosscheck.config import (
 from crosscheck.evaluate import evaluate
 from crosscheck.io_utils import write_results
 from crosscheck.llm import LLMError, create_llm
+from crosscheck.cost import estimate_run
 from crosscheck.local_model import save_examples
 from crosscheck.pipeline import STATUS_HUMAN, STATUS_TEXT, CrossCheckPipeline
 from crosscheck.prompts import build_classify_prompt
@@ -56,7 +57,8 @@ ROLE_VOTER, ROLE_ARBITER = "投票", "仲裁"
 MODEL_COLS = {
     "enabled": "启用", "role": "角色", "name": "名称", "provider": "接口类型", "base_url": "接口地址",
     "model": "模型", "api_key_env": "Key 环境变量", "weight": "权重", "temperature": "温度",
-    "max_tokens": "最大输出", "max_concurrency": "并发上限", "rpm": "每分钟请求", "extra_body": "额外参数(JSON)",
+    "max_tokens": "最大输出", "max_concurrency": "并发上限", "rpm": "每分钟请求",
+    "price_in": "输入单价(元/百万token)", "price_out": "输出单价(元/百万token)", "extra_body": "额外参数(JSON)",
 }
 MODEL_DEFAULTS = {
     f.name: (f.default if f.default is not MISSING else f.default_factory())
@@ -252,6 +254,9 @@ with tab_models:
             MODEL_COLS["max_tokens"]: st.column_config.NumberColumn(min_value=16, step=128, default=512),
             MODEL_COLS["max_concurrency"]: st.column_config.NumberColumn(min_value=0, step=1, default=0, help="0 表示不限制"),
             MODEL_COLS["rpm"]: st.column_config.NumberColumn(min_value=0, step=1, default=0, help="0 表示不限制"),
+            MODEL_COLS["price_in"]: st.column_config.NumberColumn(min_value=0.0, step=0.1, default=0.0, format="%.2f",
+                                                                  help="用于费用预估和统计，按官网价格填写；0 表示不计费用、只统计 token"),
+            MODEL_COLS["price_out"]: st.column_config.NumberColumn(min_value=0.0, step=0.1, default=0.0, format="%.2f"),
             MODEL_COLS["extra_body"]: st.column_config.TextColumn(help='例如关闭思考：{"enable_thinking": false}'),
         },
     )
@@ -515,6 +520,16 @@ with tab_run:
         c1, c2 = st.columns(2)
         concurrency = c1.number_input("总并发请求数", min_value=1, max_value=64, value=int(p.get("concurrency", 8)))
         mock = c2.toggle("mock 模式（不调用真实 API，只测流程）", value=False)
+        voters = [m["name"] for m in raw.get("models") or [] if m.get("enabled", True)]
+        cascade = st.multiselect(
+            "级联调用（可选）：首轮先只问这几个模型，它们全部一致就直接采纳，不再调用其余模型",
+            voters, default=[n for n in p.get("cascade") or [] if n in voters], key=f"cascade_{ver}",
+            help="有本地小模型时推荐“本地小模型 + 一个大模型”：实测大模型调用量降到约 57%，人工兜底后的准确率与四票全一致接近。"
+                 "没有训练数据时可选两个大模型，约省 30%，但准确率会下降几个百分点。",
+        )
+        if cascade and not 2 <= len(cascade) < len(voters):
+            st.warning("级联至少选 2 个模型，且要少于全部投票模型，否则不生效。")
+            cascade = []
 
         sub = df if not limit else df.head(int(limit))
         items, bad = [], set()
@@ -549,10 +564,33 @@ with tab_run:
                 st.warning(f"有 {overlap} 条待评估样本也在训练数据中。动态示例会自动跳过完全相同的文本，"
                            "但本地小模型已经见过这些答案，评估出的准确率会偏高。评估时建议用不在训练数据里的样本。")
 
+        run_raw = copy.deepcopy(raw)
+        run_raw["pipeline"] = {**p, "disagreement_action": action, "accept_threshold": accept,
+                               "arbiter_threshold": arb_th, "concurrency": int(concurrency), "cascade": cascade}
+
+        c1, c2, c3 = st.columns([1, 1, 2])
+        rate = c2.slider("预估时假设的分歧比例", 0.0, 1.0, 0.25, 0.05,
+                         help="首轮提示词会逐条查缓存、准确计算；后续环节（级联的其余模型、复核、仲裁）取决于模型是否一致，按这个比例估算")
+        if c1.button("💰 预估调用次数和费用", disabled=bool(bad or config_error) or not items, width="stretch"):
+            try:
+                with st.spinner("正在逐条构造提示词并查询缓存…"):
+                    st.session_state.estimate = estimate_run(config_from_dict(run_raw, mock=mock), items, rate)
+            except (ValueError, OSError, ImportError) as e:
+                st.error(f"无法预估：{e}")
+        est = st.session_state.get("estimate")
+        if est and est["n"] == len(items):
+            m = st.columns(3)
+            for col, key, title in zip(m, ("min", "expected", "max"),
+                                       ("最少（全部一致）", f"预计（{est['disagree_rate']:.0%} 分歧）", "最多（全部分歧）")):
+                col.metric(title, f"{est[key]['cost']:.3f} 元", f"实际请求 {est[key]['calls']} 次", delta_color="off")
+            st.dataframe(pd.DataFrame(est["expected"]["rows"]), hide_index=True, width="stretch",
+                         column_config={"费用": st.column_config.NumberColumn(format="%.4f 元")})
+            if est["unpriced"]:
+                st.caption(f"{est['unpriced']} 没有设置单价，费用按 0 计算（可在“① 模型配置”页填写）。")
+            st.caption("token 按字数粗略估算，误差约 ±20%；运行结束后显示接口返回的实际用量。")
+
+        st.caption("中途关闭页面或出错后重新运行同一份数据时，已完成的模型调用会命中缓存，不会重复付费。")
         if st.button(f"🚀 开始运行（{len(items)} 条）", type="primary", disabled=bool(bad or config_error) or not items):
-            run_raw = copy.deepcopy(raw)
-            run_raw["pipeline"] = {**p, "disagreement_action": action, "accept_threshold": accept,
-                                   "arbiter_threshold": arb_th, "concurrency": int(concurrency)}
             try:
                 config = config_from_dict(run_raw, mock=mock)
             except ValueError as e:
@@ -665,9 +703,20 @@ with tab_run:
         n_human = sum(r.status == STATUS_HUMAN for r in results)
         if n_human:
             st.info(f"有 {n_human} 条需要人工审核，可到“⑤ 人工审核”页逐条处理。")
-        with st.expander("模型调用统计"):
-            st.dataframe(pd.DataFrame([{"模型": k, "实际请求": v["calls"], "缓存命中": v["cache_hits"], "失败": v["errors"]}
-                                       for k, v in last["stats"].items()]), hide_index=True)
+        st.markdown("**调用次数与费用**")
+        stats = last["stats"]
+        c = st.columns(4)
+        c[0].metric("实际请求", sum(v["calls"] for v in stats.values()))
+        c[1].metric("缓存命中", sum(v["cache_hits"] for v in stats.values()))
+        c[2].metric("本次费用", f"{sum(v.get('cost', 0) for v in stats.values()):.4f} 元")
+        c[3].metric("缓存节省", f"{sum(v.get('saved', 0) for v in stats.values()):.4f} 元")
+        st.dataframe(pd.DataFrame([{"模型": k, "实际请求": v["calls"], "缓存命中": v["cache_hits"], "失败": v["errors"],
+                                    "输入 token": v.get("in_tokens", 0), "输出 token": v.get("out_tokens", 0),
+                                    "费用": v.get("cost", 0.0), "缓存节省": v.get("saved", 0.0)}
+                                   for k, v in stats.items()]), hide_index=True, width="stretch",
+                     column_config={"费用": st.column_config.NumberColumn(format="%.4f 元"),
+                                    "缓存节省": st.column_config.NumberColumn(format="%.4f 元")})
+        st.caption("token 为接口返回的实际用量（接口未返回时按字数估算）；未设置单价的模型费用按 0 计算。")
         st.caption(f"文件已保存在：{Path(last['out']).resolve()}")
 
 # ---------------- ④ 人工审核

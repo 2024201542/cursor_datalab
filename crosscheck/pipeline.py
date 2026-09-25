@@ -52,6 +52,13 @@ class ItemResult:
             "arbiter": self.arbiter.to_dict() if self.arbiter else None,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> ItemResult:
+        pred = lambda p: Prediction(**p)
+        return cls(d["id"], d["text"], d["label"], d["status"], d["confidence"],
+                   [pred(p) for p in d["round1"]], [pred(p) for p in d.get("round2") or []],
+                   pred(d["arbiter"]) if d.get("arbiter") else None, d.get("note", ""))
+
 
 class CrossCheckPipeline:
     """流程：多个模型独立分类 -> 全部一致则采纳 -> 否则交叉复核并加权投票 -> 仍不通过则仲裁 -> 仍不通过则转人工。"""
@@ -100,7 +107,16 @@ class CrossCheckPipeline:
         pc = self.config.pipeline
         ex = self.bank.nearest(text, self.config.fewshot.k) if self.bank is not None else None
 
-        r1 = list(await asyncio.gather(*(c.classify(text, ex) for c in self.classifiers)))
+        first = [c for c in self.classifiers if c.name in pc.cascade] if pc.cascade else self.classifiers
+        r1 = list(await asyncio.gather(*(c.classify(text, ex) for c in first)))
+        if len(first) < len(self.classifiers):
+            if all(p.ok for p in r1) and len({p.label for p in r1}) == 1:
+                conf = sum(p.confidence for p in r1) / len(r1)
+                note = f"级联：{' / '.join(c.name for c in first)} 一致，未调用其余模型"
+                return ItemResult(item_id, text, r1[0].label, STATUS_CONSENSUS, round(conf, 3), r1, note=note)
+            rest = [c for c in self.classifiers if c not in first]
+            done = {p.model: p for p in r1 + list(await asyncio.gather(*(c.classify(text, ex) for c in rest)))}
+            r1 = [done[c.name] for c in self.classifiers]
         valid1 = [p for p in r1 if p.ok]
         if len(valid1) >= pc.min_votes and len({p.label for p in valid1}) == 1:
             conf = sum(p.confidence for p in valid1) / len(valid1)
@@ -142,7 +158,9 @@ class CrossCheckPipeline:
         items: list[dict],
         progress: bool = True,
         on_progress: Callable[[int, int], None] | None = None,
+        on_result: Callable[[ItemResult], None] | None = None,
     ) -> list[ItemResult]:
+        """on_result 在每条样本处理完时调用（用于写断点文件）。"""
         item_sem = asyncio.Semaphore(self.config.pipeline.concurrency * 2)
         total, done, start = len(items), 0, time.monotonic()
         step = max(1, total // 20)
@@ -151,6 +169,8 @@ class CrossCheckPipeline:
             nonlocal done
             async with item_sem:
                 res = await self.process(item["id"], item["text"])
+            if on_result is not None:
+                on_result(res)
             done += 1
             if on_progress is not None:
                 on_progress(done, total)

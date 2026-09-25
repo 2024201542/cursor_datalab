@@ -4,6 +4,7 @@ import asyncio
 import json
 import random
 import re
+from dataclasses import dataclass
 
 import httpx
 
@@ -16,14 +17,25 @@ class LLMError(Exception):
     pass
 
 
+@dataclass
+class Reply:
+    text: str
+    in_tokens: int | None = None   # 接口返回的用量；None 表示接口没有返回
+    out_tokens: int | None = None
+
+
 class BaseLLM:
     cacheable = True
+    billable = True  # 是否按 token 计费（本地模型和 mock 为 False）
 
     def __init__(self, cfg: ModelConfig):
         self.cfg = cfg
 
     async def chat(self, system: str, user: str) -> str:
         raise NotImplementedError
+
+    async def complete(self, system: str, user: str) -> Reply:
+        return Reply(await self.chat(system, user))
 
 
 class HTTPLLM(BaseLLM):
@@ -42,7 +54,13 @@ class HTTPLLM(BaseLLM):
     def _parse_response(self, data: dict) -> str:
         raise NotImplementedError
 
+    def _parse_usage(self, data: dict) -> tuple[int | None, int | None]:
+        return None, None
+
     async def chat(self, system: str, user: str) -> str:
+        return (await self.complete(system, user)).text
+
+    async def complete(self, system: str, user: str) -> Reply:
         url, headers, body = self._build_request(system, user)
         last_err = ""
         for attempt in range(self.max_retries + 1):
@@ -53,9 +71,10 @@ class HTTPLLM(BaseLLM):
             else:
                 if resp.status_code == 200:
                     try:
-                        return self._parse_response(resp.json())
+                        data = resp.json()
                     except ValueError as e:
                         raise LLMError(f"[{self.cfg.name}] 响应不是合法 JSON: {e}") from e
+                    return Reply(self._parse_response(data), *self._parse_usage(data))
                 last_err = f"HTTP {resp.status_code}: {resp.text[:300]}"
                 if resp.status_code not in RETRY_STATUS:
                     break
@@ -88,6 +107,12 @@ class OpenAICompatLLM(HTTPLLM):
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError(f"[{self.cfg.name}] 响应格式异常: {str(data)[:300]}") from e
 
+    def _parse_usage(self, data):
+        u = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(u, dict):
+            return None, None
+        return u.get("prompt_tokens"), u.get("completion_tokens")
+
 
 class AnthropicLLM(HTTPLLM):
     def _build_request(self, system, user):
@@ -114,6 +139,12 @@ class AnthropicLLM(HTTPLLM):
             raise LLMError(f"[{self.cfg.name}] 响应格式异常: {str(data)[:300]}")
         return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
+    def _parse_usage(self, data):
+        u = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(u, dict):
+            return None, None
+        return u.get("input_tokens"), u.get("output_tokens")
+
 
 _TEXT_RE = re.compile(r"<text>\n?(.*?)\n?</text>", re.S)
 
@@ -122,6 +153,7 @@ class MockLLM(BaseLLM):
     """假模型：按关键词确定“正确答案”，再按 mock_accuracy 随机犯错；复核轮次准确率会提高。"""
 
     cacheable = False
+    billable = False
 
     def __init__(self, cfg: ModelConfig, labels: list[str], keywords: dict[str, list[str]]):
         super().__init__(cfg)
@@ -163,6 +195,7 @@ class LocalLLM(BaseLLM):
     """
 
     cacheable = False
+    billable = False
 
     def __init__(self, cfg: ModelConfig, config: Config):
         super().__init__(cfg)

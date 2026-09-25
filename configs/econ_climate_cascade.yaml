@@ -1,0 +1,15 @@
+# 年报气候段落：级联调用版
+# 首轮先问本地小模型（不花钱）和 DeepSeek，两者一致就直接采纳；不一致再调用千问和 Kimi，四票全一致才采纳，否则转人工
+base: econ_climate_hybrid.yaml
+
+pipeline:
+  concurrency: 8
+  min_votes: 2
+  cascade: [local, deepseek]
+  disagreement_action: human
+  cross_review: false
+  accept_threshold: 0.6
+  use_arbiter: false
+  arbiter_threshold: 0.7
+  timeout: 60
+  max_retries: 3

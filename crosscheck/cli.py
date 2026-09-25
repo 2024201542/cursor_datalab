@@ -13,6 +13,7 @@ import httpx
 
 from .aggregate import dawid_skene
 from .config import Config, load_config, load_dotenv
+from .cost import estimate_run, format_estimate
 from .evaluate import evaluate, format_report
 from .io_utils import read_items, write_results
 from .llm import LLMError, create_llm
@@ -32,16 +33,78 @@ def _print_summary(results: list[ItemResult], stats: dict, elapsed: float) -> No
     for status, text in STATUS_TEXT.items():
         n = counts.get(status, 0)
         print(f"  {text:<10} {n:>5} 条 ({n / max(len(results), 1) * 100:.1f}%)")
-    print("模型调用统计（实际请求 / 缓存命中 / 失败）:")
+    print("模型调用统计（实际请求 / 缓存命中 / 失败 | 输入 token / 输出 token | 费用 / 缓存节省）:")
     for name, s in stats.items():
-        print(f"  {name:<16} {s['calls']:>5} / {s['cache_hits']:>5} / {s['errors']:>5}")
+        est = f"（{s['estimated_calls']} 次接口未返回用量，按字数估算）" if s.get("estimated_calls") else ""
+        print(f"  {name:<16} {s['calls']:>5} / {s['cache_hits']:>5} / {s['errors']:>5} | "
+              f"{s['in_tokens']:>9} / {s['out_tokens']:>8} | {s['cost']:.4f} 元 / {s['saved']:.4f} 元{est}")
+    total, saved = sum(s["cost"] for s in stats.values()), sum(s["saved"] for s in stats.values())
+    print(f"  合计费用 {total:.4f} 元，缓存节省 {saved:.4f} 元（未设置单价的模型按 0 计算）")
 
 
-async def _run_pipeline(config: Config, items: list[dict], weights) -> tuple[list[ItemResult], dict, float]:
+def _checkpoint(out: str | Path, prefix: str) -> Path:
+    return Path(out) / f"{prefix}.checkpoint.jsonl"
+
+
+def _load_checkpoint(path: Path, items: list[dict], resume: bool) -> list[ItemResult]:
+    if not path.exists():
+        return []
+    if not resume:
+        print(f"提示：发现上次未完成的运行 {path}，本次从头开始（加 --resume 可接着跑）。", file=sys.stderr)
+        path.unlink()
+        return []
+    ids = {it["id"] for it in items}
+    done = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            try:
+                r = ItemResult.from_dict(json.loads(line))
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue  # 中断时最后一行可能没写完整
+            if r.id in ids:
+                done.append(r)
+    done = list({r.id: r for r in done}.values())
+    print(f"断点续跑：已完成 {len(done)} 条，剩余 {len(items) - len(done)} 条。", file=sys.stderr)
+    return done
+
+
+async def _run_pipeline(config: Config, items: list[dict], weights, checkpoint: Path | None = None,
+                        resume: bool = False) -> tuple[list[ItemResult], dict, float]:
     start = time.monotonic()
-    async with CrossCheckPipeline(config, weights) as pipe:
-        results = await pipe.run(items)
-        return results, pipe.stats(), time.monotonic() - start
+    done = _load_checkpoint(checkpoint, items, resume) if checkpoint else []
+    finished = {r.id for r in done}
+    todo = [it for it in items if it["id"] not in finished]
+    fh = None
+    if checkpoint:
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        fh = checkpoint.open("a", encoding="utf-8")
+
+    def save(res: ItemResult) -> None:
+        fh.write(json.dumps(res.to_dict(), ensure_ascii=False) + "\n")
+        fh.flush()
+
+    try:
+        async with CrossCheckPipeline(config, weights) as pipe:
+            new = await pipe.run(todo, on_result=save if fh else None)
+            stats = pipe.stats()
+    finally:
+        if fh:
+            fh.close()
+    by_id = {r.id: r for r in done + new}
+    return [by_id[it["id"]] for it in items], stats, time.monotonic() - start
+
+
+def _check_budget(config: Config, items: list[dict], args) -> None:
+    """--budget：预计费用超出预算时不开始运行；--estimate-only：只打印预估。"""
+    if not (args.budget or args.estimate_only):
+        return
+    est = estimate_run(config, items, args.disagree_rate)
+    print(format_estimate(est), file=sys.stderr)
+    if args.estimate_only:
+        sys.exit(0)
+    if est["expected"]["cost"] > args.budget:
+        raise ValueError(f"预计费用 {est['expected']['cost']:.4f} 元超过预算 {args.budget} 元，未开始运行。"
+                         "可以先用 --limit 试跑，或开启级联 / 调整模型。")
 
 
 def cmd_classify(args) -> None:
@@ -49,8 +112,12 @@ def cmd_classify(args) -> None:
     items = read_items(args.input, args.text_col, args.id_col)
     if args.limit:
         items = items[: args.limit]
-    results, stats, elapsed = asyncio.run(_run_pipeline(config, items, _load_weights(args.weights)))
+    _check_budget(config, items, args)
+    ckpt = _checkpoint(args.output, "results")
+    results, stats, elapsed = asyncio.run(
+        _run_pipeline(config, items, _load_weights(args.weights), ckpt, args.resume))
     paths = write_results(results, args.output, [m.name for m in config.models])
+    ckpt.unlink(missing_ok=True)
     _print_summary(results, stats, elapsed)
     print(f"\n结果: {paths['csv']}\n明细: {paths['jsonl']}\n人工审核: {paths['human']}")
 
@@ -64,9 +131,12 @@ def cmd_evaluate(args) -> None:
         raise ValueError(f"金标准中存在配置里没有的标签: {bad}")
 
     loaded = _load_weights(args.weights)
-    results, stats, elapsed = asyncio.run(_run_pipeline(config, items, loaded))
+    _check_budget(config, items, args)
+    ckpt = _checkpoint(args.output, "eval")
+    results, stats, elapsed = asyncio.run(_run_pipeline(config, items, loaded, ckpt, args.resume))
     model_names = [m.name for m in config.models]
     write_results(results, args.output, model_names, prefix="eval")
+    ckpt.unlink(missing_ok=True)
     _print_summary(results, stats, elapsed)
 
     weights = {m.name: m.weight for m in config.models} | (loaded or {})
@@ -147,6 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--text-col", default="text", help="文本列名")
             p.add_argument("--id-col", default="id", help="ID 列名")
             p.add_argument("--weights", help="模型权重 json（evaluate 生成的 weights.json）")
+            p.add_argument("--resume", action="store_true", help="从上次中断的位置继续（读取输出目录中的断点文件）")
+            p.add_argument("--budget", type=float, default=0, help="费用预算（元），预计费用超出时不运行")
+            p.add_argument("--estimate-only", action="store_true", help="只预估调用次数和费用，不运行")
+            p.add_argument("--disagree-rate", type=float, default=0.25, help="预估时假设的首轮分歧比例（默认 0.25）")
 
     p = sub.add_parser("classify", help="对数据进行互检分类")
     p.add_argument("input", help="输入 .csv / .jsonl")

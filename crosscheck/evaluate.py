@@ -32,9 +32,11 @@ def log_odds_weight(acc: float, n_labels: int) -> float:
 
 
 def _acc(preds_by_item: list[Prediction | None], gold: list[str]) -> float:
-    if not gold:
+    """None 表示该样本没有调用这个模型（级联时），不计入分母；调用失败仍算答错。"""
+    called = [(p, g) for p, g in zip(preds_by_item, gold) if p is not None]
+    if not called:
         return 0.0
-    return sum(1 for p, g in zip(preds_by_item, gold) if p is not None and p.ok and p.label == g) / len(gold)
+    return sum(1 for p, g in called if p.ok and p.label == g) / len(called)
 
 
 def _find(preds: list[Prediction], name: str) -> Prediction | None:
@@ -82,7 +84,8 @@ def evaluate(
         r1 = [_find(r.round1, m) for r in results]
         # 首轮就一致的样本没有复核轮次，复核后准确率按首轮结果计算
         r2 = [(_find(r.round2, m) if r.round2 else None) or _find(r.round1, m) for r in results]
-        per_model[m] = {"round1_acc": _acc(r1, gold_list), "round2_acc": _acc(r2, gold_list)}
+        per_model[m] = {"round1_acc": _acc(r1, gold_list), "round2_acc": _acc(r2, gold_list),
+                        "called": sum(p is not None for p in r1)}
         strategy_preds[m] = [p.label if p is not None and p.ok else None for p in r1]
 
     strategy_preds["多数投票"] = [majority_vote(r.round1) for r in results]
@@ -91,7 +94,7 @@ def evaluate(
 
     strategies = {
         name: {
-            "acc": _label_acc(preds, gold_list),
+            "acc": per_model[name]["round1_acc"] if name in per_model else _label_acc(preds, gold_list),
             "per_class": _per_class(preds, gold_list, labels),
             "kind": "model" if name in model_names else "ensemble",
         }
@@ -158,7 +161,8 @@ def format_report(rep: dict, labels: list[str]) -> str:
 
     lines += ["", "[单个模型：交叉复核前后]"]
     for m, v in rep["per_model"].items():
-        lines.append(f"  {m:<12} 首轮 {pct(v['round1_acc']):>7}   复核后 {pct(v['round2_acc']):>7}")
+        partial = f"   （级联：只在 {v['called']} 条上被调用，准确率按这些样本计算，通常偏低）" if v.get("called", rep["n"]) < rep["n"] else ""
+        lines.append(f"  {m:<12} 首轮 {pct(v['round1_acc']):>7}   复核后 {pct(v['round2_acc']):>7}{partial}")
 
     k = rep["fleiss_kappa_round1"]
     lines += [

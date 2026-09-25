@@ -60,6 +60,8 @@ task:
 # mock_accuracy: 仅 mock 模式使用，模拟该模型的准确率
 # extra_body: 透传给接口的额外参数，常用于关闭“思考模式”以提速
 # max_concurrency / rpm: 该模型单独的并发上限、每分钟请求数上限（0 表示不限制）
+# price_in / price_out: 输入 / 输出单价（元 / 百万 token），用于费用预估和统计；不填则只统计 token
+#   下面的单价取自各家官网（2026-09 查询，DeepSeek 按工作日高峰价），价格可能变动，请以官网为准
 # key 放在项目根目录的 .env 文件中（已被 .gitignore 忽略，不会上传）
 # ------------------------------------------------------------
 models:
@@ -70,6 +72,8 @@ models:
     model: deepseek-flash
     extra_body:
       thinking: {type: disabled}
+    price_in: 2.0               # 空闲时段半价
+    price_out: 8.0
     weight: 1.0
     mock_accuracy: 0.8
 
@@ -79,6 +83,8 @@ models:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: DASHSCOPE_API_KEY
     model: kimi-k2.6
+    price_in: 6.5
+    price_out: 27.0
     weight: 1.0
     mock_accuracy: 0.8
 
@@ -102,6 +108,8 @@ models:
     model: qwen3.7-plus
     extra_body:
       enable_thinking: false
+    price_in: 2.0
+    price_out: 8.0
     weight: 1.0
     mock_accuracy: 0.8
 
@@ -114,12 +122,17 @@ arbiter:
   api_key_env: DASHSCOPE_API_KEY
   model: glm-5.3
   max_tokens: 2048              # 该模型强制开启思考，需要留足 token
+  # 百炼价格页暂未列出 glm-5.3 的单价，请在百炼控制台查到后填写 price_in / price_out
   mock_accuracy: 0.9
   enabled: true
 
 pipeline:
   concurrency: 8            # 同时进行的 API 请求数上限
   min_votes: 2              # 至少需要几个模型给出有效结果才能自动采纳
+  # 级联调用：首轮先只调用列出的模型，它们全部一致就直接采纳，不再调用其余模型；不一致才调用全部模型。
+  # 例：cascade: [local, deepseek]（有训练数据时，本地小模型不花钱）或 cascade: [deepseek, qwen]
+  # 留空表示不级联，每条都调用全部模型
+  cascade: []
   # 首轮出现分歧时怎么处理：
   #   human   -> 直接转人工审核（默认）
   #   review  -> 交叉复核后投票，仍不通过再仲裁

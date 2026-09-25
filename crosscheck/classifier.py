@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .config import ModelConfig, TaskConfig
+from .cost import cost_of, estimate_tokens
 from .llm import BaseLLM, LLMError
 from .prompts import SYSTEM_PROMPT, build_arbiter_prompt, build_classify_prompt, build_review_prompt
 
@@ -51,6 +52,22 @@ def normalize_label(value: str, labels: list[str]) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
+_LOOSE_LABEL = re.compile(r'"label"\s*:\s*"([^"]*)"')
+_LOOSE_CONF = re.compile(r'"confidence"\s*:\s*"?([0-9.]+)')
+_LOOSE_REASON = re.compile(r'"reason"\s*:\s*"(.*)"\s*}', re.S)
+
+
+def _loose_fields(text: str) -> dict | None:
+    """模型常在理由里写未转义的英文双引号（如 "封板"是积极信号），导致 JSON 不合法；此时逐字段提取。"""
+    lab = _LOOSE_LABEL.search(text)
+    if not lab:
+        return None
+    conf = _LOOSE_CONF.search(text)
+    reason = _LOOSE_REASON.search(text)
+    return {"label": lab.group(1), "confidence": conf.group(1) if conf else 0.5,
+            "reason": reason.group(1) if reason else ""}
+
+
 def parse_output(raw: str, labels: list[str]) -> tuple[str, float, str]:
     text = _THINK_RE.sub("", raw).strip()
     m = _JSON_RE.search(text)
@@ -59,7 +76,9 @@ def parse_output(raw: str, labels: list[str]) -> tuple[str, float, str]:
     try:
         obj = json.loads(m.group(0))
     except json.JSONDecodeError as e:
-        raise ParseError(f"JSON 格式错误: {e}") from e
+        obj = _loose_fields(m.group(0))
+        if obj is None:
+            raise ParseError(f"JSON 格式错误: {e}") from e
     if not isinstance(obj, dict):
         raise ParseError("JSON 不是对象")
 
@@ -84,6 +103,7 @@ class LLMCache:
         self.path = Path(path)
         self.enabled = enabled
         self.data: dict[str, str] = {}
+        self.usage: dict[str, tuple[int, int]] = {}
         self._fh = None
         if enabled and self.path.exists():
             with self.path.open(encoding="utf-8") as f:
@@ -91,6 +111,8 @@ class LLMCache:
                     try:
                         rec = json.loads(line)
                         self.data[rec["key"]] = rec["response"]
+                        if rec.get("usage"):
+                            self.usage[rec["key"]] = tuple(rec["usage"])
                     except (json.JSONDecodeError, KeyError, TypeError):
                         continue
 
@@ -105,14 +127,18 @@ class LLMCache:
     def get(self, key: str) -> str | None:
         return self.data.get(key) if self.enabled else None
 
-    def put(self, key: str, response: str) -> None:
+    def put(self, key: str, response: str, usage: tuple[int, int] | None = None) -> None:
         if not self.enabled:
             return
         self.data[key] = response
+        rec = {"key": key, "response": response}
+        if usage:
+            self.usage[key] = usage
+            rec["usage"] = list(usage)
         if self._fh is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._fh = self.path.open("a", encoding="utf-8")
-        self._fh.write(json.dumps({"key": key, "response": response}, ensure_ascii=False) + "\n")
+        self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self._fh.flush()
 
     def close(self) -> None:
@@ -156,7 +182,9 @@ class Classifier:
         self.cache = cache
         self.sem = semaphore
         self.limiter = RateLimiter(llm.cfg.max_concurrency, llm.cfg.rpm)
-        self.stats = {"calls": 0, "cache_hits": 0, "errors": 0}
+        # in/out_tokens 与 cost 只统计实际请求；saved 是缓存命中省下的费用
+        self.stats = {"calls": 0, "cache_hits": 0, "errors": 0, "in_tokens": 0, "out_tokens": 0,
+                      "estimated_calls": 0, "cost": 0.0, "saved": 0.0}
 
     @property
     def name(self) -> str:
@@ -172,19 +200,34 @@ class Classifier:
         return await self._call(build_arbiter_prompt(self.task, text, opinions, examples, self.max_chars))
 
     async def _call(self, user: str) -> Prediction:
-        key = LLMCache.make_key(self.llm.cfg, SYSTEM_PROMPT, user)
+        cfg = self.llm.cfg
+        key = LLMCache.make_key(cfg, SYSTEM_PROMPT, user)
         raw = self.cache.get(key) if self.llm.cacheable else None
         from_cache = raw is not None
+        usage = None
         if from_cache:
             self.stats["cache_hits"] += 1
+            if self.llm.billable:
+                tin, tout = self.cache.usage.get(key) or (estimate_tokens(SYSTEM_PROMPT + user), estimate_tokens(raw))
+                self.stats["saved"] += cost_of(cfg, tin, tout)
         else:
             async with self.limiter.slot(), self.sem:
                 self.stats["calls"] += 1
                 try:
-                    raw = await self.llm.chat(SYSTEM_PROMPT, user)
+                    reply = await self.llm.complete(SYSTEM_PROMPT, user)
                 except LLMError as e:
                     self.stats["errors"] += 1
                     return Prediction(self.name, None, error=str(e))
+            raw = reply.text
+            if self.llm.billable:
+                if reply.in_tokens is None or reply.out_tokens is None:
+                    self.stats["estimated_calls"] += 1
+                tin = reply.in_tokens if reply.in_tokens is not None else estimate_tokens(SYSTEM_PROMPT + user)
+                tout = reply.out_tokens if reply.out_tokens is not None else estimate_tokens(raw)
+                usage = (int(tin), int(tout))
+                self.stats["in_tokens"] += usage[0]
+                self.stats["out_tokens"] += usage[1]
+                self.stats["cost"] += cost_of(cfg, *usage)
 
         try:
             label, conf, reason = parse_output(raw, self.task.label_names)
@@ -193,5 +236,5 @@ class Classifier:
             return Prediction(self.name, None, error=f"解析失败: {e}", raw=raw)
 
         if self.llm.cacheable and not from_cache:
-            self.cache.put(key, raw)
+            self.cache.put(key, raw, usage)
         return Prediction(self.name, label, conf, reason, raw=raw)

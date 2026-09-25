@@ -11,12 +11,16 @@ models:
     model: deepseek-flash
     extra_body:
       thinking: {type: disabled}
+    price_in: 2.0
+    price_out: 8.0
 
   - name: kimi
     provider: openai
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: DASHSCOPE_API_KEY
     model: kimi-k2.6
+    price_in: 6.5
+    price_out: 27.0
 
   - name: qwen
     provider: openai
@@ -25,6 +29,8 @@ models:
     model: qwen3.7-plus
     extra_body:
       enable_thinking: false
+    price_in: 2.0
+    price_out: 8.0
 
   - name: local
     provider: local               # 训练集默认取 fewshot.path

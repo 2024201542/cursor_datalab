@@ -576,6 +576,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
         <div class="feat" style="margin-top:18px"><span class="n">01</span><div><b>动态示例：稳定、几乎零成本</b><span>9 个“模型 × 数据集”组合中 8 个提升，平均 +2.9 个百分点。单个数据集 150 条的误差范围约 ±7.7 个百分点，单看一个不显著，但三个方向一致。</span></div></div>
         <div class="feat"><span class="n">02</span><div><b>小模型：用人工换准确率</b><span>全自动准确率基本不变，但让“一致”可信得多。代价是人工比例从 22% 升到 43%；“四票至少三票”是折中方案（放行约 90%，准确率约 79%）。</span></div></div>
         <div class="feat"><span class="n">03</span><div><b>FOMC 的上限在标注尺度</b><span>四票全一致仍判错的 21 条中，16 条是金标准为鹰派或鸽派、所有模型都判中性，例如“匈牙利和波兰采用了通胀目标制”被标为鹰派。</span></div></div>
+        <div class="feat"><span class="n">04</span><div><b>级联：费用降到 40%</b><span>先只问本地小模型和 DeepSeek，一致就采纳，不一致才问 Kimi 和千问。在 200 条全新股吧帖子上：费用 0.66 元 vs 1.65 元（每千条 3.3 元），人工兜底后准确率 91.0% vs 93.0%，运行前预估误差 4% 以内。</span></div></div>
       </div>
     </div>
   </div>
@@ -673,8 +674,8 @@ footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
         <ul><li class="y">配置驱动</li><li class="y">并行独立分类</li><li class="y">匿名交叉复核</li><li class="y">加权投票 · 仲裁 · 人工兜底</li><li class="y">Kappa · 混淆矩阵 · 自动权重</li><li class="y">Dawid-Skene</li><li class="y">缓存 · 限流 · 重试</li><li class="y">4 家真实模型接入</li></ul></div></div>
       <div class="ms doing reveal"><div class="card"><div class="hd"><b>v0.2</b><h3>Web 平台</h3><span class="chip c">基础版已完成</span></div>
         <ul><li class="y">页面配置模型与任务</li><li class="y">上传文件 · 图表结果</li><li class="y">分歧处理策略开关</li><li class="y">人工审核页</li><li>历史运行记录</li><li>多次运行对比</li></ul></div></div>
-      <div class="ms reveal"><div class="card"><div class="hd"><b>v0.3</b><h3>成本与稳定性</h3></div>
-        <ul><li>级联调用：便宜模型先判</li><li>断点续跑</li><li>Token 与费用统计</li><li>选项顺序随机化</li></ul></div></div>
+      <div class="ms doing reveal"><div class="card"><div class="hd"><b>v0.3</b><h3>成本与稳定性</h3><span class="chip c">主体已完成</span></div>
+        <ul><li class="y">级联调用：本地 + DeepSeek 一致即采纳，费用降到 40%</li><li class="y">断点续跑</li><li class="y">Token 与费用统计</li><li class="y">运行前费用预估 · 预算上限</li><li>置信度级联（logprobs）</li><li>选项顺序随机化</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.4</b><h3>更强的聚合与校准</h3></div>
         <ul><li>按类别的权重</li><li>置信度校准</li><li>Self-Consistency</li><li>Logprobs 置信度</li><li>动态阈值搜索</li></ul></div></div>
       <div class="ms reveal"><div class="card"><div class="hd"><b>v0.5</b><h3>高级协作模式</h3></div>
